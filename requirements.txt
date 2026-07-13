@@ -1,0 +1,13 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-dotenv>=1.0.0
+python-multipart>=0.0.9
+httpx>=0.27.0
+pillow>=10.4.0
+pydantic>=2.7.0
+
+# --- Extraction ICE : PDF (natif + rendu image) et client Ollama ----------
+# Aucune dépendance système (pas de Tesseract, pas de Poppler)
+pdfplumber>=0.11.0
+pymupdf>=1.24.0
+ollama>=0.4.0

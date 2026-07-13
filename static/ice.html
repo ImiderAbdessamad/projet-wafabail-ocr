@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Extracteur ICE — GLM (Ollama)</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="page">
+    <nav class="tool-switch">
+      <a href="/" class="tool-switch-link">Extraction CIN</a>
+      <a href="/ice" class="tool-switch-link active">Extraction ICE</a>
+    </nav>
+
+    <header class="header">
+      <div class="header-badge">
+        <span class="dot"></span>
+        Ollama · GLM Vision &amp; Texte
+      </div>
+      <h1>Extracteur de certificat ICE</h1>
+      <p class="subtitle">
+        Déposez une image ou un PDF du certificat de l'Identifiant Commun de
+        l'Entreprise — l'API extrait automatiquement l'ICE, la dénomination,
+        l'IF, le RC (numéro + ville) et le CNSS. Aucun logiciel OCR local requis.
+      </p>
+    </header>
+
+    <main class="layout">
+      <!-- Colonne gauche : upload -->
+      <section class="card upload-card">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choisir un fichier">
+          <input type="file" id="fileInput" accept="image/jpeg,image/png,application/pdf" hidden />
+
+          <div id="dropzoneEmpty" class="dropzone-empty">
+            <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 16.5V18a2 2 0 002 2h12a2 2 0 002-2v-1.5M7 9l5-5 5 5M12 4v12" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p class="dropzone-title">Glissez un fichier ici</p>
+            <p class="dropzone-hint">ou cliquez pour parcourir — JPEG, PNG ou PDF (max 15 Mo)</p>
+          </div>
+
+          <img id="previewImg" class="preview-img" alt="Aperçu du document" hidden />
+
+          <div id="previewFile" class="preview-file" hidden>
+            <svg class="preview-file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 3v5h5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="previewFileName" class="preview-file-name"></span>
+            <span id="previewFileSize" class="preview-file-size"></span>
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="analyzeBtn" class="btn btn-primary" disabled>
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M12 3v3m0 12v3m9-9h-3M6 12H3m14.95-6.95l-2.12 2.12M8.17 15.83l-2.12 2.12m11.9 0l-2.12-2.12M8.17 8.17L6.05 6.05" stroke-linecap="round"/>
+              <circle cx="12" cy="12" r="3.25"/>
+            </svg>
+            <span>Analyser le document</span>
+          </button>
+          <button id="resetBtn" class="btn btn-ghost" hidden>Réinitialiser</button>
+        </div>
+
+        <p id="errorBanner" class="error-banner" hidden></p>
+      </section>
+
+      <!-- Colonne droite : résultats -->
+      <section class="card results-card">
+        <div id="stateIdle" class="state-panel">
+          <svg class="state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3">
+            <rect x="3" y="5" width="18" height="14" rx="2.5"/>
+            <circle cx="8.5" cy="10.5" r="1.5"/>
+            <path d="M6 16l3-3 2.5 2.5L16 11l2 2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <p>Les informations extraites apparaîtront ici</p>
+        </div>
+
+        <div id="stateLoading" class="state-panel" hidden>
+          <div class="spinner"></div>
+          <p id="loadingText">Analyse du document en cours…</p>
+          <p class="state-hint">Lecture du document puis appel au modèle — quelques secondes.</p>
+        </div>
+
+        <div id="stateResult" class="result-grid" hidden>
+          <div class="result-header">
+            <h2>Informations extraites</h2>
+            <div class="meta">
+              <span id="modelBadge" class="badge"></span>
+              <span id="ocrBadge" class="badge badge-muted"></span>
+              <span id="timeBadge" class="badge badge-muted"></span>
+            </div>
+          </div>
+
+          <p id="warningBanner" class="warning-banner" hidden></p>
+
+          <div class="fields">
+            <div class="field field-wide">
+              <span class="field-label">ICE</span>
+              <span class="field-value field-mono" id="fieldIce">—</span>
+            </div>
+            <div class="field field-wide">
+              <span class="field-label">Dénomination</span>
+              <span class="field-value" id="fieldDenomination">—</span>
+            </div>
+            <div class="field">
+              <span class="field-label">Identifiant fiscal (IF)</span>
+              <span class="field-value field-mono" id="fieldIf">—</span>
+            </div>
+            <div class="field">
+              <span class="field-label">CNSS</span>
+              <span class="field-value field-mono" id="fieldCnss">—</span>
+            </div>
+            <div class="field">
+              <span class="field-label">RC — Numéro</span>
+              <span class="field-value field-mono" id="fieldRcNumero">—</span>
+            </div>
+            <div class="field">
+              <span class="field-label">RC — Ville</span>
+              <span class="field-value" id="fieldRcVille">—</span>
+            </div>
+          </div>
+
+          <button id="copyJsonBtn" class="btn btn-ghost btn-small">Copier en JSON</button>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      API disponible sur <code>/api/v1/extract-ice</code> · Documentation interactive sur
+      <a href="/docs">/docs</a>
+    </footer>
+  </div>
+
+  <script src="/ice.js"></script>
+</body>
+</html>
