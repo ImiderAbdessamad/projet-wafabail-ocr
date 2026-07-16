@@ -1,4 +1,4 @@
-"""Schémas Pydantic de l'API d'extraction de documents marocains (CIN, ICE)."""
+"""Schémas Pydantic — extraction CIN et ICE."""
 
 from __future__ import annotations
 

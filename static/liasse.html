@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Liasse Scoring — OCR Vision PCGM</title>
+  <link rel="stylesheet" href="/liasse.css" />
+</head>
+<body>
+  <div class="page">
+    <nav class="tool-switch">
+      <a href="/" class="tool-switch-link">Extraction CIN</a>
+      <a href="/ice" class="tool-switch-link">Extraction ICE</a>
+      <a href="/liasse" class="tool-switch-link active">Liasse &amp; Scoring</a>
+    </nav>
+
+    <header class="header">
+      <div class="header-badge">
+        <span class="dot"></span>
+        Ollama · GLM Vision · PCGM
+      </div>
+      <h1>Extraction &amp; Scoring Liasse Fiscale</h1>
+      <p class="subtitle">
+        Déposez une liasse fiscale marocaine (PDF scanné multi-pages ou archive ZIP).
+        L'OCR vision analyse chaque page et extrait les 19 éléments financiers PCGM,
+        puis calcule optionnellement le scoring crédit-bail à 3 axes.
+      </p>
+    </header>
+
+    <main class="layout">
+      <section class="card upload-card">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choisir un fichier">
+          <input type="file" id="fileInput" accept="application/pdf,application/zip,.zip" hidden />
+
+          <div id="dropzoneEmpty" class="dropzone-empty">
+            <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 16.5V18a2 2 0 002 2h12a2 2 0 002-2v-1.5M7 9l5-5 5 5M12 4v12" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p class="dropzone-title">Glissez un PDF ou ZIP ici</p>
+            <p class="dropzone-hint">PDF liasse scannée (multi-pages) ou archive ZIP — max 50 Mo</p>
+          </div>
+
+          <div id="previewFile" class="preview-file" hidden>
+            <svg class="preview-file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 3v5h5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="previewFileName" class="preview-file-name"></span>
+            <span id="previewFileSize" class="preview-file-size"></span>
+          </div>
+        </div>
+
+        <div id="zipPicker" class="zip-picker" hidden>
+          <label for="zipEntrySelect" class="zip-picker-label">PDF dans l'archive ZIP</label>
+          <select id="zipEntrySelect" class="zip-select"></select>
+        </div>
+
+        <div class="mode-toggle">
+          <label class="mode-option">
+            <input type="radio" name="mode" value="extract" checked />
+            <span>Extraction seule</span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="mode" value="score" />
+            <span>Extraction + Scoring</span>
+          </label>
+        </div>
+
+        <details id="scoringOverrides" class="scoring-overrides" hidden>
+          <summary>Compléments analyste pour calculer tous les ratios</summary>
+          <p>
+            Certains postes ne figurent pas toujours dans une liasse : complétez-les
+            uniquement si vous les connaissez. Les valeurs extraites du PDF restent
+            prioritaires lorsqu’aucune valeur n’est saisie ici.
+          </p>
+          <div class="override-grid">
+            <label>Fonds propres (MAD)<input data-financial="fonds_propres" type="number" min="0" step="0.01" /></label>
+            <label>CAF (MAD)<input data-financial="caf" type="number" step="0.01" /></label>
+            <label>Fonds de roulement (MAD)<input data-financial="fdr" type="number" step="0.01" /></label>
+            <label>CA N-1 (MAD)<input data-financial="ca_n1" type="number" min="0" step="0.01" /></label>
+            <label>Encours leasing (MAD)<input data-financial="encours_leasing" type="number" min="0" step="0.01" /></label>
+            <label>Crédit moyen terme / CMT (MAD)<input data-financial="cmt" type="number" min="0" step="0.01" /></label>
+            <label>Nouveau financement demandé (MAD)<input data-financial="nouveau_financement" type="number" min="0" step="0.01" /></label>
+            <label>Cotation BAM (1–9)<input data-root="bam_cotation" type="number" min="1" max="9" step="1" /></label>
+          </div>
+        </details>
+
+        <div class="actions">
+          <button id="analyzeBtn" class="btn btn-primary" disabled>
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M12 3v3m0 12v3m9-9h-3M6 12H3m14.95-6.95l-2.12 2.12M8.17 15.83l-2.12 2.12m11.9 0l-2.12-2.12M8.17 8.17L6.05 6.05" stroke-linecap="round"/>
+              <circle cx="12" cy="12" r="3.25"/>
+            </svg>
+            <span id="analyzeBtnLabel">Analyser la liasse</span>
+          </button>
+          <button id="resetBtn" class="btn btn-ghost" hidden>Réinitialiser</button>
+        </div>
+
+        <p id="errorBanner" class="error-banner" hidden></p>
+      </section>
+
+      <section class="card results-card">
+        <div id="stateIdle" class="state-panel">
+          <svg class="state-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3">
+            <rect x="2" y="4" width="20" height="16" rx="2"/>
+            <path d="M6 8h12M6 12h8M6 16h10" stroke-linecap="round"/>
+          </svg>
+          <p>Les éléments financiers extraits apparaîtront ici</p>
+        </div>
+
+        <div id="stateLoading" class="state-panel" hidden>
+          <div class="spinner"></div>
+          <p id="loadingText">OCR vision en cours…</p>
+          <p id="loadingHint" class="loading-hint">Les liasses multi-pages peuvent prendre plusieurs minutes</p>
+        </div>
+
+        <div id="stateResult" hidden>
+          <div class="result-header">
+            <div class="result-badges">
+              <span id="kindBadge" class="badge"></span>
+              <span id="completenessBadge" class="badge badge-accent"></span>
+              <span id="pagesBadge" class="badge"></span>
+              <span id="timeBadge" class="badge"></span>
+            </div>
+            <div class="export-actions">
+              <button id="copyJsonBtn" class="btn btn-ghost btn-sm" type="button">Copier JSON</button>
+              <button id="downloadJsonBtn" class="btn btn-ghost btn-sm" type="button">Export JSON</button>
+              <button id="downloadExcelBtn" class="btn btn-ghost btn-sm" type="button">Export Excel</button>
+            </div>
+          </div>
+
+          <p id="summaryText" class="summary-text"></p>
+
+          <div id="sectionsBar" class="sections-bar"></div>
+
+          <div id="warningsBox" class="warnings-box" hidden></div>
+
+          <h3 class="section-title">19 éléments financiers PCGM</h3>
+          <div id="elementsGrid" class="elements-grid"></div>
+
+          <div id="scoringMetricsSection" hidden>
+            <h3 class="section-title">Postes complémentaires pour les ratios</h3>
+            <div id="scoringMetricsGrid" class="elements-grid"></div>
+          </div>
+
+          <div id="scoringPanel" hidden>
+            <h3 class="section-title">Scoring crédit-bail (3 axes)</h3>
+            <div class="decision-card" id="decisionCard"></div>
+            <div id="axesGrid" class="axes-grid"></div>
+            <h4 class="section-subtitle">Ratios financiers</h4>
+            <div id="ratiosGrid" class="ratios-grid"></div>
+          </div>
+
+          <p id="scoringSkipped" class="scoring-skipped" hidden></p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/liasse.js"></script>
+</body>
+</html>

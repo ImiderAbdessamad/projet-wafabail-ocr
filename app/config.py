@@ -1,4 +1,4 @@
-"""Configuration centralisée de l'application (variables d'environnement)."""
+"""Configuration centralisée (variables d'environnement) — CIN, ICE, liasse."""
 
 from __future__ import annotations
 
@@ -7,47 +7,45 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# --- Ollama / modèle GLM vision -------------------------------------------
+# --- Ollama / modèles GLM -------------------------------------------------
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "glm4v")
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT", "120"))
+# Alias liasse : même modèle vision que CIN/ICE si OLLAMA_VISION_MODEL absent
+OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", OLLAMA_MODEL)
+OLLAMA_TEXT_MODEL = os.getenv("OLLAMA_TEXT_MODEL", "glm4")
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT", "180"))
+OLLAMA_TIMEOUT_SECONDS = float(os.getenv("OLLAMA_TIMEOUT", "300"))
 
-# --- CORS --------------------------------------------------------------
+# --- CORS -----------------------------------------------------------------
 ALLOWED_ORIGINS = [
     origin.strip()
     for origin in os.getenv("ALLOWED_ORIGINS", "*").split(",")
     if origin.strip()
 ]
 
-# --- Upload --------------------------------------------------------------
-MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "15"))
+# --- Upload ---------------------------------------------------------------
+MAX_UPLOAD_MB = float(os.getenv("MAX_UPLOAD_MB", "50"))
 MAX_UPLOAD_BYTES = int(MAX_UPLOAD_MB * 1024 * 1024)
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
-
-# CIN : images classiques + PDF (recto/verso scannés en un seul fichier)
 ALLOWED_CIN_CONTENT_TYPES = ALLOWED_CONTENT_TYPES | {"application/pdf"}
-
-# Dimension maximale (px, plus grand côté) d'une image envoyée au modèle
-# vision. Au-delà, le nombre de tokens image dépasse souvent le contexte du
-# serveur Ollama (ex: erreur "exceed_context_size_error" avec un modèle
-# configuré à 4096 tokens de contexte). S'applique aux photos uploadées
-# (image_utils.normalize_image) ET aux pages de PDF rendues en image
-# (text_extractor.render_pdf_pages_to_images), ces dernières étant souvent
-# bien plus grandes (page A4 entière à 200 DPI ≈ 1650×2340px).
-MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION", "1600"))
-
-# --- Extraction ICE — modèle GLM texte (aucune dépendance système) ---------
-OLLAMA_TEXT_MODEL = os.getenv("OLLAMA_TEXT_MODEL", "glm4")
-
-# Résolution (DPI) utilisée pour convertir en image les pages d'un PDF scanné
-# (via PyMuPDF, avant envoi au modèle vision)
-PDF_TO_IMAGE_DPI = int(os.getenv("PDF_TO_IMAGE_DPI", "200"))
-
-# Seuil (en caractères) sous lequel un PDF est considéré comme "scanné"
-# (texte natif insuffisant) et bascule sur le pipeline vision (image).
-MIN_NATIVE_TEXT_CHARS = int(os.getenv("MIN_NATIVE_TEXT_CHARS", "40"))
-
 ALLOWED_ICE_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png", "application/pdf"}
 
-# --- Répertoires -----------------------------------------------------------
+# Dimension max (px) envoyée au modèle vision
+MAX_IMAGE_DIMENSION = int(os.getenv("MAX_IMAGE_DIMENSION", "1600"))
+
+# --- ICE ------------------------------------------------------------------
+PDF_TO_IMAGE_DPI = int(os.getenv("PDF_TO_IMAGE_DPI", "200"))
+MIN_NATIVE_TEXT_CHARS = int(os.getenv("MIN_NATIVE_TEXT_CHARS", "40"))
+
+# --- Liasse OCR vision ----------------------------------------------------
+OCR_MAX_PAGES = int(os.getenv("OCR_MAX_PAGES", "70"))
+OCR_MAX_CONCURRENCY = int(os.getenv("OCR_MAX_CONCURRENCY", "1"))
+OCR_RETRY_ATTEMPTS = int(os.getenv("OCR_RETRY_ATTEMPTS", "5"))
+OCR_RETRY_DELAY_SECONDS = float(os.getenv("OCR_RETRY_DELAY", "15"))
+OCR_PAGE_DELAY_SECONDS = float(os.getenv("OCR_PAGE_DELAY", "4"))
+OCR_FAILED_PASS_DELAY_SECONDS = float(os.getenv("OCR_FAILED_PASS_DELAY", "20"))
+NATIVE_COMPLETENESS_THRESHOLD = float(os.getenv("NATIVE_COMPLETENESS_THRESHOLD", "15"))
+SCORING_MIN_COMPLETENESS_PCT = float(os.getenv("SCORING_MIN_COMPLETENESS_PCT", "50"))
+
+# --- Répertoires ----------------------------------------------------------
 STATIC_DIR = BASE_DIR / "static"
