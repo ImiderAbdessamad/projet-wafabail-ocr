@@ -1,0 +1,38 @@
+[
+  {"page": 1, "page_type": "IDENTIFICATION", "rows": [], "metadata": {"reference": "SIS2024D09078809", "entreprise": "STE INFRAROUTE SARL", "identification_fiscale": "3335065", "exercice": "2023", "date_debut_exercice": "01/01/2023", "date_fin_exercice": "31/12/2023"}},
+  {"page": 8, "page_type": "BILAN_ACTIF", "table_title": "Bilan Actif", "columns": ["Brut", "Amortissements et provisions", "Net exercice N", "Net exercice N-1"], "rows": [
+    {"label": "TOTAL I - ACTIF IMMOBILISE", "values": {"Brut": "11 964 530,60", "Amortissements et provisions": "1 491 581,54", "Net exercice N": "10 472 949,06"}},
+    {"label": "Clients et comptes rattaches", "values": {"Net exercice N": "15 263 856,64"}},
+    {"label": "TOTAL II - ACTIF CIRCULANT", "values": {"Net exercice N": "17 252 814,43"}},
+    {"label": "Caisse, regies d'avances et accreditifs", "values": {"Net exercice N": "20 516,39"}},
+    {"label": "TOTAL III - TRESORERIE-ACTIF", "values": {"Net exercice N": "537 762,39"}},
+    {"label": "TOTAL GENERAL", "values": {"Brut": "29 755 107,50", "Net exercice N": "27 710 609,88"}}
+  ]},
+  {"page": 9, "page_type": "BILAN_PASSIF", "table_title": "Bilan Passif", "columns": ["Exercice N"], "rows": [
+    {"label": "Total des capitaux propres", "values": {"Exercice N": "6 110 518,83"}},
+    {"label": "Dettes de financement", "values": {"Exercice N": "478 812,80"}},
+    {"label": "Fournisseurs et comptes rattaches", "values": {"Exercice N": "2 473 394,63"}},
+    {"label": "Comptes d'associes crediteurs", "values": {"Exercice N": "8 251 883,28"}},
+    {"label": "TOTAL II - PASSIF CIRCULANT", "values": {"Exercice N": "14 757 502,81"}},
+    {"label": "Credits de tresorerie", "values": {"Exercice N": "5 832 388,29"}},
+    {"label": "Banques, soldes crediteurs", "values": {"Exercice N": "531 387,15"}},
+    {"label": "TOTAL III - TRESORERIE-PASSIF", "values": {"Exercice N": "6 363 775,44"}}
+  ]},
+  {"page": 11, "page_type": "CPC", "table_title": "CPC", "columns": ["Operations propres a l'exercice", "Operations concernant les exercices precedents", "Total de l'exercice"], "rows": [
+    {"label": "Chiffre d'affaires", "values": {"Total de l'exercice": "12 385 759,61"}},
+    {"label": "Dont a l'export", "values": {}, "empty": true},
+    {"label": "Achats revendus de marchandises", "values": {"Total de l'exercice": "6 166 864,11"}},
+    {"label": "Achats consommes de matieres et fournitures", "values": {"Total de l'exercice": "703 547,53"}},
+    {"label": "Autres charges externes", "values": {"Total de l'exercice": "1 226 169,58"}},
+    {"label": "Impots et taxes", "values": {"Total de l'exercice": "71 444,80"}},
+    {"label": "Charges de personnel", "values": {"Total de l'exercice": "3 082 414,99"}},
+    {"label": "Autres charges d'exploitation", "values": {"Total de l'exercice": "20,49"}},
+    {"label": "Dotations d'exploitation", "values": {"Total de l'exercice": "167 433,04"}},
+    {"label": "Charges d'interets", "values": {"Total de l'exercice": "141 952,39"}},
+    {"label": "RESULTAT NET DE L'EXERCICE", "values": {"Operations propres a l'exercice": "621 997,04", "Operations concernant les exercices precedents": "-27 264,00", "Total de l'exercice": "594 733,04"}}
+  ]},
+  {"page": 14, "page_type": "ESG", "rows": [
+    {"label": "Capacite d'autofinancement", "values": {"Exercice": "330 958,05"}},
+    {"label": "Chiffre d'affaires exercice precedent", "values": {"Exercice": "12 217 426,08"}}
+  ]}
+]

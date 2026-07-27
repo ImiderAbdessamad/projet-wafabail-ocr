@@ -31,95 +31,64 @@ from app.config import (
     OLLAMA_VISION_MODEL,
     PDF_TO_IMAGE_DPI,
 )
-from app.schemas.liasse import (
-    FinancialElement,
-    LiasseExtractionResult,
-    RawComponent,
-    ScoringInput,
+from app.schemas.liasse import LiasseExtractionResult
+from app.services.accounting_checks import run_accounting_checks
+from app.services.derived_fields import apply_derived_fields
+from app.services.field_resolver import (
+    extract_document_metadata,
+    observations_from_page_payload,
+    resolve_all_fields,
 )
-from app.services.liasse_extraction import ELEMENTS_19, SCORING_METRICS
+from app.services.result_builder import build_extraction_result
 
 logger = logging.getLogger(__name__)
 
-_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
-_VISION_CODES = (
-    [code for _, code, _, _ in ELEMENTS_19 if code != "TYPE_RESULTAT"]
-    + list(SCORING_METRICS)
-)
 _VALID_SECTIONS = {"BILAN_ACTIF", "BILAN_PASSIF", "CPC"}
 
-_CODE_PAGE_PREFERENCE: dict[str, str] = {
-    "ACTIFS_IMMOBILISES": "BILAN_ACTIF",
-    "TOTAL_BILAN": "BILAN_ACTIF",
-    "ACTIF_CIRCULANT": "BILAN_ACTIF",
-    "CREANCES_CLIENTS": "BILAN_ACTIF",
-    "TRESORERIE_ACTIF": "BILAN_ACTIF",
-    "CAISSE": "BILAN_ACTIF",
-    "DETTES_BANCAIRES_MLT": "BILAN_PASSIF",
-    "DETTES_BANCAIRES_CT": "BILAN_PASSIF",
-    "PASSIF_CIRCULANT": "BILAN_PASSIF",
-    "DETTES_FOURNISSEURS": "BILAN_PASSIF",
-    "COMPTE_COURANT_ASSOCIES": "BILAN_PASSIF",
-    "TRESORERIE_PASSIF": "BILAN_PASSIF",
-    "CHIFFRE_AFFAIRES": "CPC",
-    "CA_EXPORT": "CPC",
-    "ACHATS_REVENDUS": "CPC",
-    "AUTRES_CHARGES": "CPC",
-    "CHARGES_INTERETS": "CPC",
-    "RESULTAT_NET": "CPC",
-    "FONDS_PROPRES": "BILAN_PASSIF",
-    "CAF": "CPC",
-    "FDR": "BILAN_PASSIF",
-    "CA_N1": "CPC",
-    "AMORTISSEMENTS": "CPC",
-    "ENCOURS_LEASING": "BILAN_PASSIF",
-    "CMT": "BILAN_PASSIF",
+_SYSTEM_PROMPT = """Tu es un expert-comptable PCGM (liasse fiscale marocaine).
+Analyse cette page et retourne UNIQUEMENT un JSON valide (pas de markdown).
+
+Tu dois extraire les OBSERVATIONS BRUTES des tableaux (libellés + colonnes),
+SANS choisir toi-même entre brut/net, SANS calculer d'agrégats métier.
+
+Format attendu :
+{
+  "page_type": "BILAN_ACTIF" | "BILAN_PASSIF" | "CPC" | "ESG" | "IDENTIFICATION" | "AUTRE",
+  "table_title": "titre du tableau si visible",
+  "columns": ["Brut", "Amortissements et provisions", "Net exercice N", "Net exercice N-1"],
+  "rows": [
+    {
+      "label": "libellé exact de la ligne",
+      "values": {
+        "Brut": "11 964 530,68",
+        "Amortissements et provisions": "1 491 581,62",
+        "Net exercice N": "10 472 949,06"
+      },
+      "empty": false
+    }
+  ],
+  "metadata": {
+    "reference": null,
+    "entreprise": null,
+    "identification_fiscale": null,
+    "exercice": null,
+    "date_debut_exercice": null,
+    "date_fin_exercice": null
+  }
 }
 
-_ELEMENTS_JSON_KEYS = ", ".join(f'"{c}": null' for c in _VISION_CODES)
-
-_SYSTEM_PROMPT = f"""Tu es un expert-comptable PCGM (liasse fiscale marocaine).
-Analyse cette page et retourne UNIQUEMENT un JSON valide (pas de markdown) :
-{{
-  "page_type": "BILAN_ACTIF" | "BILAN_PASSIF" | "CPC" | "AUTRE",
-  "elements": {{ {_ELEMENTS_JSON_KEYS} }},
-  "empty_fields": ["CODE_DU_POSTE"]
-}}
-
-Types de page :
-- BILAN_ACTIF : tableau bilan actif (immobilisations, actif circulant, trésorerie actif)
-- BILAN_PASSIF : tableau bilan passif (capitaux propres, dettes, fournisseurs, trésorerie passif)
-- CPC : compte de produits et charges (CA, achats, charges, résultat net)
-- AUTRE : page de garde, ESG, annexe
-
-Règles :
-- Montants en MAD, nombres JSON (point décimal). Colonne « Net exercice » pour les bilans.
-- null si le poste n'est PAS visible sur cette page. Ne devine jamais.
-- `empty_fields` contient seulement les codes dont le libellé est clairement
-  visible mais dont la case de valeur est réellement vide. Ne mets pas un code
-  dans cette liste s'il n'apparaît pas sur la page.
-- FONDS_PROPRES = total des capitaux propres ; CAF = capacité d'autofinancement
-  si affichée (souvent ESG) ; FDR = fonds de roulement si affiché ; CA_N1 =
-  chiffre d'affaires de l'exercice précédent ; AMORTISSEMENTS = dotations aux
-  amortissements/provisions ; ENCOURS_LEASING et CMT seulement si explicitement
-  affichés. NOUVEAU_FINANCEMENT est externe au document : toujours null.
-- Synonymes PCGM à reconnaître :
-  - fonds propres : « capitaux propres », « total des capitaux propres »,
-    « capitaux propres assimilés » ;
-  - dettes financières : « dettes de financement », « emprunts et dettes
-    assimilées », « emprunts obligataires », « autres dettes de financement » ;
-  - dettes CT : « crédits de trésorerie », « concours bancaires courants »,
-    « banques soldes créditeurs » ;
-  - fournisseurs : « fournisseurs et comptes rattachés », « fournisseurs » ;
-  - clients : « clients et comptes rattachés », « créances de l'actif
-    circulant » ;
-  - CA : « chiffre d'affaires », « chiffres d'affaires », « ventes de biens
-    et services produits » ;
-  - achats : « achats revendus de marchandises », « achats consommés de
-    matières et fournitures » ;
-  - amortissements : « dotations d'exploitation », « dotations aux
-    amortissements et provisions » ;
-  - FDR : « fonds de roulement », « fonds de roulement fonctionnel ».
+Règles STRICTES :
+- Conserve le libellé EXACT de chaque ligne utile (totaux et postes détaillés).
+- Associe chaque montant à SA colonne (en-tête). Ne déplace jamais une valeur entre lignes.
+- Pour le CPC, distingue « opérations propres à l'exercice », « exercices précédents »,
+  « total de l'exercice » dans les clés de values.
+- Cellule vide mais ligne visible : mets "empty": true et values {} ou null.
+- Cellule illisible : omets la colonne ou mets null — ne devine pas.
+- Extrais TOUTES les lignes utiles même si tu ne sais pas à quel indicateur elles correspondent.
+- Pages d'identification : renseigne metadata (raison sociale, IF, référence dépôt, exercice).
+- Ne calcule PAS de totaux dérivés (CAF, FDR, autres charges agrégées) : extrais seulement
+  les lignes affichées.
+- Montants tels qu'affichés (espaces, virgule décimale française autorisée dans les strings).
 """
 
 _HTTP_TIMEOUT = httpx.Timeout(
@@ -232,6 +201,9 @@ async def _warmup_model() -> None:
         raise VisionOcrError(f"Pré-vérification Ollama impossible : {exc}") from exc
 
 
+_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
 def _parse_json_lenient(raw_content: str, page_num: int) -> dict[str, Any]:
     """Parse JSON du modèle avec fallbacks (réponses tronquées / mal formées)."""
     raw = raw_content.strip()
@@ -244,23 +216,14 @@ def _parse_json_lenient(raw_content: str, page_num: int) -> dict[str, Any]:
     except json.JSONDecodeError:
         pass
 
-    # Fallback : extraction champ par champ
+    # Fallback partiel : page_type + rows si présents
     page_type_m = re.search(r'"page_type"\s*:\s*"([A-Z_]+)"', raw, re.IGNORECASE)
-    elements: dict[str, Any] = {}
-    for code in _VISION_CODES:
-        m = re.search(
-            rf'"{code}"\s*:\s*(null|[-]?\d+(?:\.\d+)?)',
-            raw,
-            re.IGNORECASE,
-        )
-        if m:
-            elements[code] = None if m.group(1).lower() == "null" else m.group(1)
-
-    if page_type_m or elements:
-        logger.info("JSON partiel récupéré page %d (%d champs).", page_num, len(elements))
+    if page_type_m:
+        logger.info("JSON partiel récupéré page %d (page_type seul).", page_num)
         return {
-            "page_type": page_type_m.group(1).upper() if page_type_m else "AUTRE",
-            "elements": elements,
+            "page_type": page_type_m.group(1).upper(),
+            "rows": [],
+            "columns": [],
         }
 
     raise VisionOcrError(f"JSON illisible page {page_num}.")
@@ -354,28 +317,16 @@ async def _vision_call(
     raise last_exc or VisionOcrError(f"Échec page {page_num}")
 
 
-def _to_float(value: Any) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        v = float(value)
-        return None if abs(v) > 1e12 else v
-    if isinstance(value, str):
-        cleaned = value.strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
-        try:
-            v = float(cleaned)
-            return None if abs(v) > 1e12 else v
-        except ValueError:
-            return None
-    return None
-
-
-def _merge_page_results(
+def _assemble_from_page_results(
     page_results: list[tuple[int, dict[str, Any] | None, str | None]],
-) -> tuple[dict[str, float], set[str], set[str], list[str], int]:
-    best: dict[str, tuple[float, int]] = {}
+    pages_total: int,
+    elapsed_ms: int,
+    filename: str | None,
+) -> LiasseExtractionResult:
+    """Niveau 1→5 : observations → résolution → dérivés → validations → JSON."""
+    all_observations = []
+    payloads: list[dict[str, Any]] = []
     sections_found: set[str] = set()
-    empty_codes: set[str] = set()
     page_errors: list[str] = []
     pages_used = 0
 
@@ -386,154 +337,61 @@ def _merge_page_results(
         if not result:
             continue
         pages_used += 1
+        payloads.append(result)
         page_type = (result.get("page_type") or "AUTRE").upper()
-        elements = result.get("elements") or {}
-        empty_codes.update(
-            code for code in result.get("empty_fields", []) if code in _VISION_CODES
-        )
-        page_has_value = False
+        if page_type in _VALID_SECTIONS:
+            # Section détectée si rows ou elements présents
+            if result.get("rows") or result.get("elements"):
+                sections_found.add(page_type)
+        elif page_type == "ESG":
+            sections_found.add("CPC")  # CAF souvent dans ESG
+        obs = observations_from_page_payload(idx + 1, result)
+        all_observations.extend(obs)
 
-        for code, raw_value in elements.items():
-            if code not in _VISION_CODES:
-                continue
-            val = _to_float(raw_value)
-            if val is None:
-                continue
-            page_has_value = True
-            preferred = _CODE_PAGE_PREFERENCE.get(code, "")
-            priority = 2 if page_type == preferred else (1 if page_type in _VALID_SECTIONS else 0)
-            current = best.get(code)
-            if current is None or priority > current[1]:
-                best[code] = (val, priority)
-            elif priority == current[1] and abs(val) > abs(current[0]):
-                best[code] = (val, priority)
-
-        if page_has_value and page_type in _VALID_SECTIONS:
-            sections_found.add(page_type)
-
-    return (
-        {code: pair[0] for code, pair in best.items()},
-        sections_found,
-        empty_codes,
-        page_errors,
-        pages_used,
-    )
-
-
-def _build_result(
-    values: dict[str, float],
-    sections_found: set[str],
-    empty_codes: set[str],
-    page_errors: list[str],
-    pages_used: int,
-    pages_total: int,
-    elapsed_ms: int,
-    filename: str | None,
-) -> LiasseExtractionResult:
-    financial_elements: list[FinancialElement] = []
-    for num, code, label, source in ELEMENTS_19:
-        if code == "TYPE_RESULTAT":
-            resultat_net = values.get("RESULTAT_NET")
-            note = None
-            if resultat_net is not None:
-                note = (
-                    "Bénéficiaire" if resultat_net > 0
-                    else ("Déficitaire" if resultat_net < 0 else "Nul")
-                )
-            financial_elements.append(
-                FinancialElement(
-                    number=num, code=code, label=label, value=None,
-                    source=source, note=note,
-                    confidence=0.8 if resultat_net is not None else 0.0,
-                    detection_status="derived" if resultat_net is not None else "not_detected",
-                )
-            )
-            continue
-        val = values.get(code)
-        financial_elements.append(
-            FinancialElement(
-                number=num, code=code, label=label, value=val,
-                source=source, confidence=0.8 if val is not None else 0.0,
-                detection_status=(
-                    "detected" if val is not None
-                    else ("empty" if code in empty_codes else "not_detected")
-                ),
-            )
+    if not all_observations:
+        raise VisionOcrError(
+            f"Aucun poste identifié ({pages_used}/{pages_total} pages OK)."
         )
 
-    treso_actif = values.get("TRESORERIE_ACTIF")
-    treso_passif = values.get("TRESORERIE_PASSIF")
-    tresorerie_nette = (
-        treso_actif - treso_passif
-        if treso_actif is not None and treso_passif is not None
-        else None
-    )
-    raw_components = [
-        RawComponent(label=label, value=values[code], source=source, feeds=feeds)
-        for code, (label, source, feeds) in SCORING_METRICS.items()
-        if values.get(code) is not None
-    ]
+    resolved = resolve_all_fields(all_observations)
+    resolved = apply_derived_fields(resolved)
+    check_warnings, _ = run_accounting_checks(resolved)
+    metadata = extract_document_metadata(all_observations, payloads)
 
-    scoring_input = ScoringInput(
-        chiffre_affaires=values.get("CHIFFRE_AFFAIRES"),
-        ca_export=values.get("CA_EXPORT"),
-        ca_n1=values.get("CA_N1"),
-        total_bilan=values.get("TOTAL_BILAN"),
-        fonds_propres=values.get("FONDS_PROPRES"),
-        actifs_immobilises=values.get("ACTIFS_IMMOBILISES"),
-        actif_circulant=values.get("ACTIF_CIRCULANT"),
-        clients=values.get("CREANCES_CLIENTS"),
-        fournisseurs=values.get("DETTES_FOURNISSEURS"),
-        dettes_financieres=values.get("DETTES_BANCAIRES_MLT"),
-        dettes_bancaires_ct=values.get("DETTES_BANCAIRES_CT"),
-        passif_circulant=values.get("PASSIF_CIRCULANT"),
-        tresorerie_actif=treso_actif,
-        tresorerie_passif=treso_passif,
-        tresorerie_nette=tresorerie_nette,
-        achats=values.get("ACHATS_REVENDUS"),
-        frais_financiers=values.get("CHARGES_INTERETS"),
-        amortissements=values.get("AMORTISSEMENTS"),
-        caf=values.get("CAF"),
-        fdr=values.get("FDR"),
-        resultat_net=values.get("RESULTAT_NET"),
-        compte_courant_associes=values.get("COMPTE_COURANT_ASSOCIES"),
-        encours_leasing=values.get("ENCOURS_LEASING"),
-        cmt=values.get("CMT"),
-        nouveau_financement=values.get("NOUVEAU_FINANCEMENT"),
-    )
+    provenance = {
+        code: {
+            "selected_value": (
+                str(res.selected_value) if res.selected_value is not None else None
+            ),
+            "detection_status": res.detection_status,
+            "confidence": res.confidence,
+            "selection_reason": res.selection_reason,
+            "validation_status": res.validation_status,
+            "candidates": [
+                {
+                    "value": str(c.value) if c.value is not None else None,
+                    "source": c.source,
+                    "column": c.column,
+                    "score": c.score,
+                    "raw_label": c.raw_label,
+                }
+                for c in (res.candidates or [])[:5]
+            ],
+        }
+        for code, res in resolved.items()
+    }
 
-    sections_completeness = {s: s in sections_found for s in _VALID_SECTIONS}
-    complete_count = sum(
-        1 for el in financial_elements if el.value is not None and el.confidence > 0
-    )
-    completeness = round(100.0 * complete_count / len(ELEMENTS_19), 1)
-
-    warnings = [
-        f"OCR vision ({OLLAMA_VISION_MODEL}) — {pages_used}/{pages_total} page(s) OK."
-    ]
-    if pages_total > OCR_MAX_PAGES:
-        warnings.append(f"Seules les {OCR_MAX_PAGES} premières pages ont été analysées.")
-    for section, ok in sections_completeness.items():
-        if not ok:
-            warnings.append(f"Section {section} non identifiée.")
-    warnings.extend(page_errors)
-
-    return LiasseExtractionResult(
-        document_kind="LIASSE_OCR",
-        elements=financial_elements,
-        raw_components=raw_components,
-        scoring_input=scoring_input,
-        sections_completeness=sections_completeness,
-        completeness_pct=completeness,
-        warnings=warnings,
+    sections_detected = {s: s in sections_found for s in _VALID_SECTIONS}
+    return build_extraction_result(
+        resolved=resolved,
+        metadata=metadata,
+        sections_detected=sections_detected,
         pages_total=pages_total,
         pages_analyzed=pages_used,
-        processing_time_ms=elapsed_ms,
-        source_filename=filename,
-        document_summary=(
-            f"Liasse {filename or ''} — {pages_used}/{pages_total} pages, "
-            f"{complete_count}/{len(ELEMENTS_19)} éléments."
-        ),
+        elapsed_ms=elapsed_ms,
+        filename=filename,
+        extra_warnings=page_errors + check_warnings,
+        field_provenance=provenance,
     )
 
 
@@ -596,7 +454,7 @@ async def _retry_failed_pages(
 async def extract_liasse_via_vision(
     content: bytes, filename: str | None = None
 ) -> LiasseExtractionResult:
-    """Extraction OCR vision avec pré-vérification, retries et 2e passe."""
+    """Extraction OCR vision avec pipeline observation → résolution → validation."""
     async with _OCR_JOB_LOCK:
         t0 = time.perf_counter()
         await _warmup_model()
@@ -608,15 +466,9 @@ async def extract_liasse_via_vision(
         page_results = await _process_all_pages(page_images, total_to_analyze)
         page_results = await _retry_failed_pages(page_images, page_results, total_to_analyze)
 
-        values, sections_found, empty_codes, page_errors, pages_used = _merge_page_results(page_results)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-
-        if not values:
-            raise VisionOcrError(
-                f"Aucun poste identifié ({pages_used}/{total_to_analyze} pages OK)."
-            )
-
-        return _build_result(
-            values, sections_found, empty_codes, page_errors, pages_used,
-            pages_total, elapsed_ms, filename,
+        return _assemble_from_page_results(
+            page_results, pages_total, elapsed_ms, filename
         )
+
+
