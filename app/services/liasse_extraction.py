@@ -24,6 +24,7 @@ from app.schemas.liasse import (
     RawComponent,
     ScoringInput,
 )
+from app.services.document_inspector import inspect_document
 
 # Référentiel canonique des 19 éléments financiers (cf. « Formules de calcul »)
 ELEMENTS_19: list[tuple[int, str, str, str]] = [
@@ -151,10 +152,82 @@ def _regex_amount(text: str, pattern: str) -> float | None:
     return _parse_amount(m.group(1))
 
 
+def _build_result_from_observations(
+    observations,
+    *,
+    metadata: dict[str, str | None],
+    pages_total: int | None,
+    filename: str | None,
+    document_kind: str,
+    document_type: str = "financial_statements",
+    period_type: str = "actual",
+    inspection=None,
+) -> LiasseExtractionResult:
+    from app.services.accounting_checks import run_accounting_checks
+    from app.services.derived_fields import apply_derived_fields
+    from app.services.field_resolver import resolve_all_fields
+    from app.services.result_builder import build_extraction_result
+
+    resolved = resolve_all_fields(observations)
+    resolved = apply_derived_fields(resolved)
+    warnings, _, accounting_checks = run_accounting_checks(resolved)
+    provenance = {
+        code: {
+            "selected_value": str(res.selected_value) if res.selected_value is not None else None,
+            "calculated_value": str(res.calculated_value) if res.calculated_value is not None else None,
+            "detection_status": res.detection_status,
+            "confidence": res.confidence,
+            "selection_reason": res.selection_reason,
+            "validation_status": res.validation_status,
+        }
+        for code, res in resolved.items()
+    }
+    sections_detected = {
+        "BILAN_ACTIF": any(o.section == "BILAN_ACTIF" for o in observations),
+        "BILAN_PASSIF": any(o.section == "BILAN_PASSIF" for o in observations),
+        "CPC": any(o.section in {"CPC", "ESG"} for o in observations),
+    }
+    result = build_extraction_result(
+        resolved=resolved,
+        metadata=type("Meta", (), metadata)(),
+        sections_detected=sections_detected,
+        pages_total=pages_total or 0,
+        pages_analyzed=pages_total or 0,
+        elapsed_ms=0,
+        filename=filename,
+        document_kind=document_kind,
+        document_type=document_type,
+        period_type=period_type,
+        inspection=inspection,
+        extra_warnings=warnings,
+        field_provenance=provenance,
+        accounting_checks=accounting_checks,
+        eligible_for_automatic_scoring=(period_type == "actual"),
+        scoring_mode="actual" if period_type == "actual" else "forecast_review",
+    )
+    return result
+
+
 def parse_pcgm_native_liasse(
     text: str, filename: str | None = None, pages_total: int | None = None
 ) -> LiasseExtractionResult:
     """Extraction texte d'une liasse PCGM native (multi-pages, couche texte)."""
+    from app.services.native_observation_extractor import (
+        extract_metadata_from_native_text,
+        extract_native_observations,
+    )
+
+    observations = extract_native_observations(text)
+    metadata = extract_metadata_from_native_text(text)
+    if observations:
+        return _build_result_from_observations(
+            observations,
+            metadata=metadata,
+            pages_total=pages_total,
+            filename=filename,
+            document_kind="LIASSE_NATIVE",
+        )
+
     values: dict[str, float | None] = {}
 
     values["CHIFFRE_AFFAIRES"] = _find_amount_near_label(
@@ -439,6 +512,23 @@ class LiasseExtractionService:
     # Cas 1 : rapport d'indicateurs structuré
     # ------------------------------------------------------------------
     def _parse_indicateurs_report(self, text: str) -> LiasseExtractionResult:
+        from app.services.native_observation_extractor import (
+            extract_metadata_from_native_text,
+            extract_report_observations,
+        )
+
+        observations = extract_report_observations(text)
+        if observations:
+            return _build_result_from_observations(
+                observations,
+                metadata=extract_metadata_from_native_text(text),
+                pages_total=1,
+                filename=None,
+                document_kind="RAPPORT_INDICATEURS",
+                document_type="extraction_report",
+                period_type="actual",
+            )
+
         warnings: list[str] = []
 
         ref_m = re.search(r"Référence liasse\s*:\s*(\S+)", text)
@@ -743,22 +833,52 @@ async def extract_liasse_document(
 
     text = _norm(extract_pdf_text(content))
     pages_total = count_pdf_pages(content)
+    inspection = inspect_document(content)
+    document_type = inspection.document_type
+    period_type = inspection.period_type
+
+    if document_type == "forecast_financial_statements":
+        native = parse_pcgm_native_liasse(text, filename, pages_total) if text.strip() else LiasseExtractionResult(document_kind="LIASSE_ECHEC")
+        native.document_type = document_type
+        native.period_type = period_type
+        native.eligible_for_automatic_scoring = False
+        native.scoring_mode = "forecast_review"
+        native.inspection = inspection
+        native.scoring_block_reasons = ["Document prévisionnel : scoring automatique réel interdit."]
+        return native
 
     if len(text.strip()) >= 50 and (
         "Rapport des Éléments Financiers" in text
         or "Éléments Financiers Calculés" in text
     ):
-        return service.extract(content, filename)
+        report = service.extract(content, filename)
+        report.document_type = document_type
+        report.period_type = period_type
+        report.eligible_for_automatic_scoring = period_type == "actual"
+        report.scoring_mode = "actual" if period_type == "actual" else "forecast_review"
+        report.inspection = inspection
+        return report
 
     # Liasse PCGM native (texte) — ex. LIASSE FISCALE DMT FY25.pdf
     if is_pcgm_native_liasse(text):
         native = parse_pcgm_native_liasse(text, filename, pages_total)
+        native.document_type = document_type
+        native.period_type = period_type
+        native.eligible_for_automatic_scoring = period_type == "actual"
+        native.scoring_mode = "actual" if period_type == "actual" else "forecast_review"
+        native.inspection = inspection
         if native.completeness_pct >= NATIVE_COMPLETENESS_THRESHOLD:
             return native
 
     # Scannée ou texte insuffisant → OCR vision (séquentiel + retries)
     try:
-        return await extract_liasse_via_vision(content, filename)
+        vision = await extract_liasse_via_vision(content, filename)
+        vision.document_type = document_type
+        vision.period_type = period_type
+        vision.eligible_for_automatic_scoring = period_type == "actual"
+        vision.scoring_mode = "actual" if period_type == "actual" else "forecast_review"
+        vision.inspection = inspection
+        return vision
     except VisionOcrError as exc:
         # Dernier recours : retourner le résultat texte partiel si disponible
         if is_pcgm_native_liasse(text):

@@ -27,6 +27,43 @@ class FieldCalculation(BaseModel):
     inputs: dict[str, Optional[float]] = {}
 
 
+class AccountingCheckResult(BaseModel):
+    check_code: str
+    status: str  # passed | warning | failed | not_applicable | insufficient_data
+    severity: str
+    fields: list[str] = []
+    expected_value: Optional[float] = None
+    actual_value: Optional[float] = None
+    difference: Optional[float] = None
+    tolerance: float = 0.0
+    message: str
+
+
+class PageInspection(BaseModel):
+    page_number: int
+    text_length: int = 0
+    has_native_text: bool = False
+    declared_rotation: int = 0
+    width: float = 0.0
+    height: float = 0.0
+    is_blank: bool = False
+    page_type: str = "AUTRE"
+    warnings: list[str] = []
+
+
+class DocumentInspection(BaseModel):
+    pages_total: int
+    pages_with_native_text: int = 0
+    pages_scanned: int = 0
+    blank_pages: list[int] = []
+    rotated_pages: dict[int, int] = {}
+    page_inspections: list[PageInspection] = []
+    document_type: str = "unknown"
+    period_type: str = "unknown"
+    confidence: float = 0.0
+    warnings: list[str] = []
+
+
 class FinancialElement(BaseModel):
     """Élément financier calculé (1 des 19)."""
 
@@ -49,6 +86,7 @@ class FinancialElement(BaseModel):
     selection_reason: Optional[str] = None
     validation: Optional[FieldValidation] = None
     calculation: Optional[FieldCalculation] = None
+    eligible_for_scoring: bool = True
 
 
 class ScoringInput(BaseModel):
@@ -108,3 +146,10 @@ class LiasseExtractionResult(BaseModel):
     source_filename: Optional[str] = None
     # Debug / audit : résolutions par champ (candidates, scores)
     field_provenance: Optional[dict[str, Any]] = None
+    accounting_checks: list[AccountingCheckResult] = []
+    scoring_block_reasons: list[str] = []
+    eligible_for_automatic_scoring: Optional[bool] = None
+    scoring_mode: Optional[str] = None
+    document_type: Optional[str] = None
+    period_type: Optional[str] = None
+    inspection: Optional[DocumentInspection] = None

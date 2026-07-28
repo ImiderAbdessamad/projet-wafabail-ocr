@@ -76,6 +76,38 @@ def test_scoring_incidents_manual_review():
     assert d["decision"]["blocking_status"] == "MANUAL_REVIEW"
 
 
+def test_scoring_without_behavior_data_is_not_treated_as_irreproachable():
+    payload = json.loads(json.dumps(REFERENCE_PAYLOAD))
+    payload["behavioral_data"] = {}
+    d = client.post("/api/v1/scoring/evaluate", json=payload).json()
+    assert d["axe2"]["details"]["status"] == "not_provided"
+    assert d["eligibility"]["behavioral_coverage"] == 0.0
+    assert "irréprochable" not in " ".join(d["synthese"]["points_forts"]).lower()
+
+
+def test_scoring_empty_payload_does_not_return_a_plus():
+    payload = {"financial_data": {}, "behavioral_data": {}}
+    d = client.post("/api/v1/scoring/evaluate", json=payload).json()
+    assert d["decision"]["classe"] == "Non évaluable"
+    assert d["decision"]["blocking_status"] == "INSUFFICIENT_DATA"
+
+
+def test_negative_caf_does_not_produce_good_repayment_capacity():
+    payload = json.loads(json.dumps(REFERENCE_PAYLOAD))
+    payload["financial_data"]["caf"] = -100
+    d = client.post("/api/v1/scoring/evaluate", json=payload).json()
+    assert d["ratios"]["capacite_remboursement"]["status"] == "Non conforme"
+    assert "CAF négative" in d["ratios"]["capacite_remboursement"]["reason"]
+
+
+def test_negative_funds_do_not_produce_good_debt_ratio():
+    payload = json.loads(json.dumps(REFERENCE_PAYLOAD))
+    payload["financial_data"]["fonds_propres"] = -100
+    d = client.post("/api/v1/scoring/evaluate", json=payload).json()
+    assert d["ratios"]["ratio_endettement"]["status"] == "Non conforme"
+    assert "Fonds propres négatifs" in d["ratios"]["ratio_endettement"]["reason"]
+
+
 def test_scoring_history_variations():
     payload = dict(
         REFERENCE_PAYLOAD,
@@ -140,6 +172,34 @@ def test_complete_extraction_with_ratio_inputs_can_be_scored():
         ),
     )
     assert _scoring_block_reason(extraction) is None
+
+
+def test_forecast_extraction_is_blocked_before_scoring():
+    extraction = LiasseExtractionResult(
+        document_kind="LIASSE_NATIVE",
+        document_type="forecast_financial_statements",
+        period_type="forecast",
+        eligible_for_automatic_scoring=False,
+        scoring_mode="forecast_review",
+        scoring_block_reasons=["Document prévisionnel : scoring automatique réel interdit."],
+        completeness_pct=90.0,
+        sections_completeness={
+            "BILAN_ACTIF": True,
+            "BILAN_PASSIF": True,
+            "CPC": True,
+        },
+        scoring_input=ScoringInput(
+            chiffre_affaires=10_000_000,
+            total_bilan=8_000_000,
+            resultat_net=900_000,
+            fonds_propres=3_000_000,
+            caf=1_100_000,
+            fdr=600_000,
+        ),
+    )
+    assert _scoring_block_reason(extraction) == (
+        "Document prévisionnel : scoring automatique réel interdit."
+    )
 
 
 @pytest.mark.parametrize(

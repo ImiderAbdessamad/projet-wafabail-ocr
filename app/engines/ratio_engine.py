@@ -5,6 +5,10 @@ from typing import Dict, TypedDict
 class RatioResult(TypedDict):
     value: float | None
     status: str  # "Conforme" | "À surveiller" | "Non conforme" | "Non calculable"
+    reason: str | None
+    numerator: float | None
+    denominator: float | None
+    validity_status: str
 
 
 def evaluate_status(
@@ -36,55 +40,106 @@ def safe_div(num: Decimal | float | None, den: Decimal | float | None) -> float 
     return float(num) / den_f
 
 
+def _result(
+    value: float | None,
+    status: str,
+    *,
+    reason: str | None = None,
+    numerator: Decimal | float | None = None,
+    denominator: Decimal | float | None = None,
+    validity_status: str = "valid",
+) -> RatioResult:
+    return {
+        "value": value,
+        "status": status,
+        "reason": reason,
+        "numerator": None if numerator is None else float(numerator),
+        "denominator": None if denominator is None else float(denominator),
+        "validity_status": validity_status,
+    }
+
+
 # --- 1.1 Structure financière et solvabilité ---
 
 def autonomie_financiere(fp: Decimal | None, total_bilan: Decimal | None) -> RatioResult:
+    if fp is None or total_bilan is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=fp, denominator=total_bilan, validity_status="missing")
+    if float(total_bilan) <= 0:
+        return _result(None, "Non calculable", reason="Total bilan nul ou négatif.", numerator=fp, denominator=total_bilan, validity_status="invalid_denominator")
     val = safe_div(fp, total_bilan)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
-    return {"value": val, "status": evaluate_status(val, 0.20, 0.10, False)}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=fp, denominator=total_bilan, validity_status="invalid_denominator")
+    status = "Non conforme" if float(fp) < 0 else evaluate_status(val, 0.20, 0.10, False)
+    reason = "Fonds propres négatifs." if float(fp) < 0 else None
+    return _result(val, status, reason=reason, numerator=fp, denominator=total_bilan)
 
 
 def ratio_endettement(endettement: Decimal | None, fp: Decimal | None) -> RatioResult:
     """Endettement / FP. Le repère 1,5x est indicatif (référence sectorielle,
     pas un couperet — cf. note de lecture du rapport type) : Conforme ≤ 2,0x,
     À surveiller ≤ 3,0x."""
+    if endettement is None or fp is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=endettement, denominator=fp, validity_status="missing")
+    if float(fp) < 0:
+        return _result(None, "Non conforme", reason="Fonds propres négatifs.", numerator=endettement, denominator=fp, validity_status="economically_invalid")
+    if float(fp) == 0:
+        return _result(None, "Non conforme", reason="Fonds propres nuls.", numerator=endettement, denominator=fp, validity_status="invalid_denominator")
     val = safe_div(endettement, fp)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
-    return {"value": val, "status": evaluate_status(val, 2.0, 3.0, True)}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=endettement, denominator=fp, validity_status="invalid_denominator")
+    return _result(val, evaluate_status(val, 2.0, 3.0, True), numerator=endettement, denominator=fp)
 
 
 def capacite_remboursement(dettes_fin: Decimal | None, caf: Decimal | None) -> RatioResult:
     """Dettes de financement / CAF. Le repère 3 ans est indicatif :
     Conforme ≤ 5 ans, À surveiller ≤ 7 ans (au-delà, capacité insuffisante)."""
+    if dettes_fin is None or caf is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=dettes_fin, denominator=caf, validity_status="missing")
+    if float(caf) < 0:
+        return _result(None, "Non conforme", reason="CAF négative.", numerator=dettes_fin, denominator=caf, validity_status="economically_invalid")
+    if float(caf) == 0:
+        return _result(None, "Non conforme", reason="CAF nulle.", numerator=dettes_fin, denominator=caf, validity_status="invalid_denominator")
     val = safe_div(dettes_fin, caf)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
-    return {"value": val, "status": evaluate_status(val, 5.0, 7.0, True)}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=dettes_fin, denominator=caf, validity_status="invalid_denominator")
+    return _result(val, evaluate_status(val, 5.0, 7.0, True), numerator=dettes_fin, denominator=caf)
 
 
 # --- 1.2 Rentabilité et autofinancement ---
 
 def capacite_autofinancement_ca(caf: Decimal | None, ca: Decimal | None) -> RatioResult:
+    if caf is None or ca is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=caf, denominator=ca, validity_status="missing")
+    if float(ca) <= 0:
+        return _result(None, "Non calculable", reason="Chiffre d'affaires nul ou négatif.", numerator=caf, denominator=ca, validity_status="invalid_denominator")
+    if float(caf) < 0:
+        return _result(safe_div(caf, ca), "Non conforme", reason="CAF négative.", numerator=caf, denominator=ca, validity_status="economically_invalid")
     val = safe_div(caf, ca)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
-    return {"value": val, "status": evaluate_status(val, 0.05, 0.02, False)}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=caf, denominator=ca, validity_status="invalid_denominator")
+    return _result(val, evaluate_status(val, 0.05, 0.02, False), numerator=caf, denominator=ca)
 
 
 def rentabilite_commerciale(rn: Decimal | None, ca: Decimal | None) -> RatioResult:
+    if rn is None or ca is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=rn, denominator=ca, validity_status="missing")
+    if float(ca) <= 0:
+        return _result(None, "Non calculable", reason="Chiffre d'affaires nul ou négatif.", numerator=rn, denominator=ca, validity_status="invalid_denominator")
     val = safe_div(rn, ca)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
-    return {"value": val, "status": evaluate_status(val, 0.05, 0.02, False)}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=rn, denominator=ca, validity_status="invalid_denominator")
+    return _result(val, evaluate_status(val, 0.05, 0.02, False), numerator=rn, denominator=ca)
 
 
 def rentabilite_financiere(rn: Decimal | None, fp: Decimal | None) -> RatioResult:
+    if rn is None or fp is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=rn, denominator=fp, validity_status="missing")
+    if float(fp) <= 0:
+        return _result(None, "Non calculable", reason="Fonds propres nuls ou négatifs.", numerator=rn, denominator=fp, validity_status="economically_invalid")
     val = safe_div(rn, fp)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
-    return {"value": val, "status": evaluate_status(val, 0.10, 0.05, False)}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=rn, denominator=fp, validity_status="invalid_denominator")
+    return _result(val, evaluate_status(val, 0.10, 0.05, False), numerator=rn, denominator=fp)
 
 
 def rentabilite_economique(
@@ -98,12 +153,12 @@ def rentabilite_economique(
     silently compute a meaningless ratio.
     """
     if rn is None or fp is None or dettes_fin is None:
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=rn, denominator=None, validity_status="missing")
     den = float(fp) + float(dettes_fin)
-    if den == 0.0:
-        return {"value": None, "status": "Non calculable"}
+    if den <= 0.0:
+        return _result(None, "Non calculable", reason="Base économique nulle ou négative.", numerator=rn, denominator=den, validity_status="economically_invalid")
     val = float(rn) / den
-    return {"value": val, "status": evaluate_status(val, 0.05, 0.02, False)}
+    return _result(val, evaluate_status(val, 0.05, 0.02, False), numerator=rn, denominator=den)
 
 
 # --- 1.3 Liquidité et cycle d'exploitation ---
@@ -117,12 +172,12 @@ def fdr_ca(fdr: Decimal | None, ca: Decimal | None) -> RatioResult:
     """
     val = safe_div(fdr, ca)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="Donnée manquante ou CA nul.", numerator=fdr, denominator=ca, validity_status="invalid_denominator")
     if val > 0:
-        return {"value": val, "status": "Conforme"}
+        return _result(val, "Conforme", numerator=fdr, denominator=ca)
     if val == 0:
-        return {"value": val, "status": "À surveiller"}
-    return {"value": val, "status": "Non conforme"}
+        return _result(val, "À surveiller", numerator=fdr, denominator=ca)
+    return _result(val, "Non conforme", numerator=fdr, denominator=ca)
 
 
 def tresorerie_jours_ca(treso_nette: Decimal | None, ca: Decimal | None) -> RatioResult:
@@ -134,21 +189,25 @@ def tresorerie_jours_ca(treso_nette: Decimal | None, ca: Decimal | None) -> Rati
     """
     val = safe_div(treso_nette, ca)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="Donnée manquante ou CA nul.", numerator=treso_nette, denominator=ca, validity_status="invalid_denominator")
     val_j = val * 360
     if val_j > 0:
-        return {"value": val_j, "status": "Conforme"}
+        return _result(val_j, "Conforme", numerator=treso_nette, denominator=ca)
     if val_j == 0:
-        return {"value": val_j, "status": "À surveiller"}
-    return {"value": val_j, "status": "Non conforme"}
+        return _result(val_j, "À surveiller", numerator=treso_nette, denominator=ca)
+    return _result(val_j, "Non conforme", numerator=treso_nette, denominator=ca)
 
 
 def delais_clients(clients: Decimal | None, ca: Decimal | None) -> RatioResult:
+    if clients is None or ca is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=clients, denominator=ca, validity_status="missing")
+    if float(ca) <= 0:
+        return _result(None, "Non calculable", reason="Chiffre d'affaires nul ou négatif.", numerator=clients, denominator=ca, validity_status="invalid_denominator")
     val = safe_div(clients, ca)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=clients, denominator=ca, validity_status="invalid_denominator")
     val_j = val * 360
-    return {"value": val_j, "status": evaluate_status(val_j, 60, 90, True)}
+    return _result(val_j, evaluate_status(val_j, 60, 90, True), numerator=clients, denominator=ca)
 
 
 def delais_fournisseurs(
@@ -156,19 +215,23 @@ def delais_fournisseurs(
     achats: Decimal | None,
     clients_j: float | None,
 ) -> RatioResult:
+    if fournisseurs is None or achats is None:
+        return _result(None, "Non calculable", reason="Donnée manquante.", numerator=fournisseurs, denominator=achats, validity_status="missing")
+    if float(achats) <= 0:
+        return _result(None, "Non calculable", reason="Achats nuls ou négatifs.", numerator=fournisseurs, denominator=achats, validity_status="invalid_denominator")
     val = safe_div(fournisseurs, achats)
     if val is None:
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="Division impossible.", numerator=fournisseurs, denominator=achats, validity_status="invalid_denominator")
     val_j = val * 360
     if clients_j is None:
-        return {"value": val_j, "status": "À surveiller"}
+        return _result(val_j, "À surveiller", reason="Délais clients indisponibles.", numerator=fournisseurs, denominator=achats, validity_status="partial_context")
     # Repère indicatif : un léger décalage (< 20 %) sous les délais clients
     # reste Conforme (cf. rapport type : 64 j vs 78 j classé Conforme).
     if val_j >= clients_j * 0.8:
-        return {"value": val_j, "status": "Conforme"}
+        return _result(val_j, "Conforme", numerator=fournisseurs, denominator=achats)
     if val_j >= clients_j * 0.5:
-        return {"value": val_j, "status": "À surveiller"}
-    return {"value": val_j, "status": "Non conforme"}
+        return _result(val_j, "À surveiller", numerator=fournisseurs, denominator=achats)
+    return _result(val_j, "Non conforme", numerator=fournisseurs, denominator=achats)
 
 
 # --- Ratios complémentaires (docx : §1.4 activité, §1.5 endettement global) ---
@@ -176,9 +239,9 @@ def delais_fournisseurs(
 def croissance_ca(ca_n: Decimal | None, ca_n1: Decimal | None) -> RatioResult:
     """Croissance du CA N vs N-1. Conforme ≥ 5 %, à surveiller ≥ 0 %."""
     if ca_n is None or ca_n1 is None or float(ca_n1) == 0.0:
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="CA N-1 absent, nul ou invalide.", numerator=ca_n, denominator=ca_n1, validity_status="invalid_denominator")
     val = (float(ca_n) - float(ca_n1)) / abs(float(ca_n1))
-    return {"value": val, "status": evaluate_status(val, 0.05, 0.0, False)}
+    return _result(val, evaluate_status(val, 0.05, 0.0, False), numerator=float(ca_n) - float(ca_n1), denominator=ca_n1)
 
 
 def endettement_global_apres_operation(
@@ -192,14 +255,18 @@ def endettement_global_apres_operation(
     Intègre l'encours leasing, le crédit moyen terme et le nouveau
     financement demandé. Conforme ≤ 2,0x, à surveiller ≤ 3,0x.
     """
-    if fp is None or float(fp) == 0.0:
-        return {"value": None, "status": "Non calculable"}
+    if fp is None:
+        return _result(None, "Non calculable", reason="Fonds propres absents.", numerator=None, denominator=fp, validity_status="missing")
+    if float(fp) < 0.0:
+        return _result(None, "Non conforme", reason="Fonds propres négatifs.", numerator=None, denominator=fp, validity_status="economically_invalid")
+    if float(fp) == 0.0:
+        return _result(None, "Non conforme", reason="Fonds propres nuls.", numerator=None, denominator=fp, validity_status="invalid_denominator")
     parts = [encours_leasing, cmt, nouveau_financement]
     if all(p is None for p in parts):
-        return {"value": None, "status": "Non calculable"}
+        return _result(None, "Non calculable", reason="Aucune composante d'endettement après opération.", numerator=None, denominator=fp, validity_status="missing")
     total = sum(float(p) for p in parts if p is not None)
     val = total / float(fp)
-    return {"value": val, "status": evaluate_status(val, 2.0, 3.0, True)}
+    return _result(val, evaluate_status(val, 2.0, 3.0, True), numerator=total, denominator=fp)
 
 
 # Métadonnées d'affichage : formule et seuil de référence par ratio (docx tableaux 1.1-1.3)

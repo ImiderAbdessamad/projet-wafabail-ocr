@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from app.schemas.liasse import (
+    AccountingCheckResult,
+    DocumentInspection,
     FinancialElement,
     FieldValidation,
     LiasseExtractionResult,
@@ -12,6 +14,7 @@ from app.schemas.observations import DocumentMetadata, FieldResolution
 from app.services.amount_parser import decimal_to_float
 from app.services.field_definitions import FIELD_DEFINITIONS
 from app.services.liasse_extraction import ELEMENTS_19, SCORING_METRICS
+from app.services.scoring_eligibility import is_field_usable
 
 _VALID_SECTIONS = ("BILAN_ACTIF", "BILAN_PASSIF", "CPC")
 
@@ -42,6 +45,19 @@ def _float(resolution: FieldResolution | None) -> float | None:
     return decimal_to_float(resolution.selected_value)
 
 
+def _scoring_float(resolution: FieldResolution | None) -> float | None:
+    if not resolution:
+        return None
+    if not is_field_usable(
+        resolution.detection_status,
+        resolution.confidence,
+        resolution.validation_status,
+        eligible_for_scoring=resolution.eligible_for_scoring,
+    ):
+        return None
+    return decimal_to_float(resolution.selected_value)
+
+
 def build_extraction_result(
     *,
     resolved: dict[str, FieldResolution],
@@ -51,8 +67,16 @@ def build_extraction_result(
     pages_analyzed: int,
     elapsed_ms: int,
     filename: str | None,
+    document_kind: str = "LIASSE_OCR",
+    document_type: str | None = None,
+    period_type: str | None = None,
+    inspection: DocumentInspection | None = None,
     extra_warnings: list[str] | None = None,
     field_provenance: dict | None = None,
+    accounting_checks: list[AccountingCheckResult] | None = None,
+    scoring_block_reasons: list[str] | None = None,
+    eligible_for_automatic_scoring: bool | None = None,
+    scoring_mode: str | None = None,
 ) -> LiasseExtractionResult:
     financial_elements: list[FinancialElement] = []
 
@@ -93,6 +117,7 @@ def build_extraction_result(
                 column=res.column if res else None,
                 selection_reason=res.selection_reason if res else None,
                 validation=validation,
+                eligible_for_scoring=res.eligible_for_scoring if res else True,
             )
         )
 
@@ -111,31 +136,31 @@ def build_extraction_result(
 
     # Scoring input
     scoring_input = ScoringInput(
-        chiffre_affaires=_float(resolved.get("CHIFFRE_AFFAIRES")),
-        ca_export=_float(resolved.get("CA_EXPORT")),
-        ca_n1=_float(resolved.get("CA_N1")),
-        total_bilan=_float(resolved.get("TOTAL_BILAN")),
-        fonds_propres=_float(resolved.get("FONDS_PROPRES")),
-        actifs_immobilises=_float(resolved.get("ACTIFS_IMMOBILISES")),
-        actif_circulant=_float(resolved.get("ACTIF_CIRCULANT")),
-        clients=_float(resolved.get("CREANCES_CLIENTS")),
-        fournisseurs=_float(resolved.get("DETTES_FOURNISSEURS")),
-        dettes_financieres=_float(resolved.get("DETTES_FINANCIERES")),
-        dettes_bancaires_ct=_float(resolved.get("DETTES_BANCAIRES_CT")),
-        passif_circulant=_float(resolved.get("PASSIF_CIRCULANT")),
-        tresorerie_actif=_float(resolved.get("TRESORERIE_ACTIF")),
-        tresorerie_passif=_float(resolved.get("TRESORERIE_PASSIF")),
-        tresorerie_nette=_float(resolved.get("TRESORERIE_NETTE")),
-        achats=_float(resolved.get("ACHATS_REVENDUS")),
-        frais_financiers=_float(resolved.get("CHARGES_INTERETS")),
-        amortissements=_float(resolved.get("AMORTISSEMENTS")),
-        caf=_float(resolved.get("CAF")),
-        fdr=_float(resolved.get("FDR")),
-        resultat_net=_float(resolved.get("RESULTAT_NET")),
-        compte_courant_associes=_float(resolved.get("COMPTE_COURANT_ASSOCIES")),
-        encours_leasing=_float(resolved.get("ENCOURS_LEASING")),
-        cmt=_float(resolved.get("CMT")),
-        nouveau_financement=_float(resolved.get("NOUVEAU_FINANCEMENT")),
+        chiffre_affaires=_scoring_float(resolved.get("CHIFFRE_AFFAIRES")),
+        ca_export=_scoring_float(resolved.get("CA_EXPORT")),
+        ca_n1=_scoring_float(resolved.get("CA_N1")),
+        total_bilan=_scoring_float(resolved.get("TOTAL_BILAN")),
+        fonds_propres=_scoring_float(resolved.get("FONDS_PROPRES")),
+        actifs_immobilises=_scoring_float(resolved.get("ACTIFS_IMMOBILISES")),
+        actif_circulant=_scoring_float(resolved.get("ACTIF_CIRCULANT")),
+        clients=_scoring_float(resolved.get("CREANCES_CLIENTS")),
+        fournisseurs=_scoring_float(resolved.get("DETTES_FOURNISSEURS")),
+        dettes_financieres=_scoring_float(resolved.get("DETTES_FINANCIERES")),
+        dettes_bancaires_ct=_scoring_float(resolved.get("DETTES_BANCAIRES_CT")),
+        passif_circulant=_scoring_float(resolved.get("PASSIF_CIRCULANT")),
+        tresorerie_actif=_scoring_float(resolved.get("TRESORERIE_ACTIF")),
+        tresorerie_passif=_scoring_float(resolved.get("TRESORERIE_PASSIF")),
+        tresorerie_nette=_scoring_float(resolved.get("TRESORERIE_NETTE")),
+        achats=_scoring_float(resolved.get("ACHATS_REVENDUS")),
+        frais_financiers=_scoring_float(resolved.get("CHARGES_INTERETS")),
+        amortissements=_scoring_float(resolved.get("AMORTISSEMENTS")),
+        caf=_scoring_float(resolved.get("CAF")),
+        fdr=_scoring_float(resolved.get("FDR")),
+        resultat_net=_scoring_float(resolved.get("RESULTAT_NET")),
+        compte_courant_associes=_scoring_float(resolved.get("COMPTE_COURANT_ASSOCIES")),
+        encours_leasing=_scoring_float(resolved.get("ENCOURS_LEASING")),
+        cmt=_scoring_float(resolved.get("CMT")),
+        nouveau_financement=_scoring_float(resolved.get("NOUVEAU_FINANCEMENT")),
     )
 
     # Complétude : champs directs réellement détectés (pas ambiguous invalide)
@@ -176,13 +201,13 @@ def build_extraction_result(
             and resolved[c].detection_status
             in ("detected", "detected_zero", "derived")
         )
-        sections_extraction_complete[section] = filled >= max(1, len(codes) // 2)
+        sections_extraction_complete[section] = filled == len(codes)
         validated = sum(
             1
             for c in codes
             if resolved.get(c) and resolved[c].validation_status == "consistent"
         )
-        sections_validated[section] = validated > 0 and validated >= filled // 2
+        sections_validated[section] = validated == len(codes) and len(codes) > 0
 
     # Rétrocompat : sections_completeness = extraction réellement utile
     sections_completeness = {
@@ -203,7 +228,7 @@ def build_extraction_result(
         exercice=metadata.exercice,
         date_debut_exercice=metadata.date_debut_exercice,
         date_fin_exercice=metadata.date_fin_exercice,
-        document_kind="LIASSE_OCR",
+        document_kind=document_kind,
         elements=financial_elements,
         raw_components=raw_components,
         scoring_input=scoring_input,
@@ -218,6 +243,13 @@ def build_extraction_result(
         processing_time_ms=elapsed_ms,
         source_filename=filename,
         field_provenance=field_provenance,
+        accounting_checks=accounting_checks or [],
+        scoring_block_reasons=scoring_block_reasons or [],
+        eligible_for_automatic_scoring=eligible_for_automatic_scoring,
+        scoring_mode=scoring_mode,
+        document_type=document_type,
+        period_type=period_type,
+        inspection=inspection,
         document_summary=(
             f"Liasse {filename or ''} — {pages_analyzed}/{pages_total} pages, "
             f"complétude {completeness}%."

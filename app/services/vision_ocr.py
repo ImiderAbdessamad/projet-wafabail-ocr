@@ -39,6 +39,7 @@ from app.services.field_resolver import (
     observations_from_page_payload,
     resolve_all_fields,
 )
+from app.services.page_preprocessor import crop_region, preprocess_page_image
 from app.services.result_builder import build_extraction_result
 
 logger = logging.getLogger(__name__)
@@ -138,10 +139,11 @@ def render_pdf_pages(data: bytes, max_pages: int | None = None) -> list[bytes]:
     try:
         doc = fitz.open(stream=io.BytesIO(data), filetype="pdf")
         matrix = fitz.Matrix(PDF_TO_IMAGE_DPI / 72, PDF_TO_IMAGE_DPI / 72)
-        pages = [
-            page.get_pixmap(matrix=matrix).tobytes("jpeg")
-            for page in doc[: min(len(doc), limit)]
-        ]
+        pages = []
+        for page in doc[: min(len(doc), limit)]:
+            rendered = page.get_pixmap(matrix=matrix).tobytes("jpeg")
+            preprocessed = preprocess_page_image(rendered, orientation=int(page.rotation or 0) % 360)
+            pages.append(preprocessed.image_bytes)
         doc.close()
     except Exception as exc:
         raise VisionOcrError(f"Rendu des pages impossible : {exc}") from exc
@@ -317,6 +319,31 @@ async def _vision_call(
     raise last_exc or VisionOcrError(f"Échec page {page_num}")
 
 
+def _merge_region_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {
+        "page_type": "AUTRE",
+        "table_title": "regional_merge",
+        "columns": [],
+        "rows": [],
+        "metadata": {},
+    }
+    seen_rows: set[tuple[str, str]] = set()
+    for payload in payloads:
+        if payload.get("page_type") in {"BILAN_ACTIF", "BILAN_PASSIF", "CPC", "ESG"}:
+            merged["page_type"] = payload["page_type"]
+        for col in payload.get("columns", []) or []:
+            if col not in merged["columns"]:
+                merged["columns"].append(col)
+        merged["metadata"].update(payload.get("metadata") or {})
+        for row in payload.get("rows", []) or []:
+            row_key = (row.get("label") or "", json.dumps(row.get("values") or {}, sort_keys=True))
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
+            merged["rows"].append(row)
+    return merged
+
+
 def _assemble_from_page_results(
     page_results: list[tuple[int, dict[str, Any] | None, str | None]],
     pages_total: int,
@@ -355,7 +382,7 @@ def _assemble_from_page_results(
 
     resolved = resolve_all_fields(all_observations)
     resolved = apply_derived_fields(resolved)
-    check_warnings, _ = run_accounting_checks(resolved)
+    check_warnings, _, accounting_checks = run_accounting_checks(resolved)
     metadata = extract_document_metadata(all_observations, payloads)
 
     provenance = {
@@ -392,6 +419,7 @@ def _assemble_from_page_results(
         filename=filename,
         extra_warnings=page_errors + check_warnings,
         field_provenance=provenance,
+        accounting_checks=accounting_checks,
     )
 
 
@@ -444,8 +472,24 @@ async def _retry_failed_pages(
             updated[idx] = (idx, result, None)
             logger.info("Page %d récupérée en 2e passe.", idx + 1)
         except VisionOcrError as exc:
-            logger.warning("Page %d toujours en échec après 2e passe : %s", idx + 1, exc)
-            updated[idx] = (idx, None, str(exc))
+            try:
+                preprocessed = preprocess_page_image(small_img)
+                region_payloads: list[dict[str, Any]] = []
+                for region in preprocessed.regions[1:]:
+                    region_img = crop_region(preprocessed.image_bytes, region)
+                    region_payloads.append(
+                        await _vision_call(
+                            region_img,
+                            idx + 1,
+                            total_to_analyze,
+                            max_attempts=max(2, OCR_RETRY_ATTEMPTS),
+                        )
+                    )
+                updated[idx] = (idx, _merge_region_payloads(region_payloads), None)
+                logger.info("Page %d récupérée par fallback régional.", idx + 1)
+            except VisionOcrError as region_exc:
+                logger.warning("Page %d toujours en échec après 2e passe : %s", idx + 1, region_exc)
+                updated[idx] = (idx, None, str(region_exc))
         await asyncio.sleep(OCR_PAGE_DELAY_SECONDS)
 
     return updated

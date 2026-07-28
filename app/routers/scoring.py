@@ -23,10 +23,12 @@ from app.schemas.scoring import (
     AxeScore,
     DecisionOutput,
     RatioDetail,
+    ScoringEligibilityOutput,
     ScoringRequest,
     ScoringResponse,
     SyntheseOutput,
 )
+from app.services.scoring_eligibility import evaluate_manual_request_eligibility
 
 router = APIRouter(prefix="/scoring", tags=["Scoring"])
 
@@ -95,7 +97,8 @@ def _build_ratio_details(
             unit=meta.get("unit", ""),
             value=res["value"],
             status=res["status"],
-            reason=(
+            reason=res.get("reason")
+            or (
                 _ratio_missing_reason(key, raw_data)
                 if res["status"] == "Non calculable"
                 else None
@@ -134,7 +137,9 @@ def _build_synthese(
     fdr = ratio_details.get("fdr_sur_ca")
     if treso and fdr and treso.status == "Conforme" and fdr.status == "Conforme":
         forts.append("Trésorerie nette et fonds de roulement positifs.")
-    if not axe2_details.get("signaux"):
+    if axe2_details.get("status") == "not_provided":
+        vigilance.append("Données comportementales non renseignées.")
+    elif not axe2_details.get("signaux"):
         forts.append("Comportement bancaire irréprochable : aucun signal négatif relevé.")
     n_comp = axe3_details.get("indicateurs_compares", 0)
     n_above = sum(
@@ -187,19 +192,35 @@ async def evaluate_scoring(request: ScoringRequest) -> ScoringResponse:
         utilisation_decouvert_pct=b.utilisation_decouvert_pct,
         ecart_flux_ca_pct=b.ecart_flux_ca_pct,
         engagements_honores=b.engagements_honores,
+        provided_fields=set(getattr(b, "model_fields_set", set())),
     )
 
     # Axe 3 — sectoriel
     axe3_result = score_axe3_sectoriel(ratios, request.sector_medians)
 
-    total_incidents = (b.incidents_paiement or 0) + (b.effets_impayes or 0)
-    decision = evaluate_application(
-        bam_cotation=request.bam_cotation,
-        axe1=axe1_result["score"],
-        axe2=axe2_result["score"],
-        axe3=axe3_result["score"],
-        incidents=total_incidents,
+    eligibility = evaluate_manual_request_eligibility(
+        request.financial_data,
+        request.behavioral_data,
+        ratios,
     )
+
+    total_incidents = (b.incidents_paiement or 0) + (b.effets_impayes or 0)
+    if eligibility.eligible:
+        decision = evaluate_application(
+            bam_cotation=request.bam_cotation,
+            axe1=axe1_result["score"],
+            axe2=axe2_result["score"] or 0.0,
+            axe3=axe3_result["score"],
+            incidents=total_incidents,
+        )
+    else:
+        decision = {
+            "score": None,
+            "classe": "Non évaluable",
+            "decision": "Revue manuelle",
+            "recommandation": " ; ".join(eligibility.blocking_reasons or ["Données insuffisantes pour le scoring automatique."]),
+            "blocking_status": "INSUFFICIENT_DATA",
+        }
 
     ratio_details = _build_ratio_details(ratios, raw_data)
     synthese = _build_synthese(ratio_details, axe2_result, axe3_result)
@@ -214,10 +235,10 @@ async def evaluate_scoring(request: ScoringRequest) -> ScoringResponse:
             details={k: v for k, v in axe1_result.items() if k != "score"},
         ),
         axe2=AxeScore(
-            score=axe2_result["score"],
+            score=axe2_result["score"] or 0.0,
             ponderation=0.15,
-            contribution=round(axe2_result["score"] * 0.15, 2),
-            details={"signaux": axe2_result["signaux"]},
+            contribution=round((axe2_result["score"] or 0.0) * 0.15, 2),
+            details={k: v for k, v in axe2_result.items() if k != "score"},
         ),
         axe3=AxeScore(
             score=axe3_result["score"],
@@ -227,4 +248,5 @@ async def evaluate_scoring(request: ScoringRequest) -> ScoringResponse:
         ),
         decision=DecisionOutput(**decision),
         synthese=synthese,
+        eligibility=ScoringEligibilityOutput(**eligibility.model_dump()),
     )

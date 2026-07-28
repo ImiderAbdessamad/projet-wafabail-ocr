@@ -16,6 +16,7 @@ from app.routers.scoring import evaluate_scoring
 from app.schemas.liasse import LiasseExtractionResult
 from app.schemas.scoring import (
     BehavioralMetricsInput,
+    DecisionOutput,
     FinancialDataInput,
     ScoringRequest,
     ScoringResponse,
@@ -31,6 +32,7 @@ from app.services.liasse_extraction import (
     extract_liasse_document,
     get_liasse_extraction_service,
 )
+from app.services.scoring_eligibility import evaluate_extraction_eligibility
 
 router = APIRouter(prefix="/extraction", tags=["Extraction"])
 
@@ -77,12 +79,17 @@ def _scoring_block_reason(
             "Extraction OCR échouée — aucune donnée exploitable, scoring non lancé. "
             "Vérifiez la qualité du scan et la disponibilité du serveur Ollama."
         )
+    if extraction.eligible_for_automatic_scoring is False:
+        return extraction.scoring_block_reasons[0] if extraction.scoring_block_reasons else (
+            "Scoring non lancé : document non admissible au scoring automatique."
+        )
 
     missing_sections = [
         section
         for section in ("BILAN_ACTIF", "BILAN_PASSIF", "CPC")
         if not extraction.sections_completeness.get(section, False)
     ]
+    elements_by_code = {element.code: element for element in extraction.elements}
     data = financial or FinancialDataInput(
         **extraction.scoring_input.model_dump()
     )
@@ -96,11 +103,28 @@ def _scoring_block_reason(
         "fonds de roulement": data.fdr,
     }
     missing_values = [label for label, value in required_values.items() if value is None]
+    invalid_values = []
+    for code, label in (
+        ("CHIFFRE_AFFAIRES", "chiffre d'affaires"),
+        ("TOTAL_BILAN", "total bilan"),
+        ("RESULTAT_NET", "résultat net"),
+        ("FONDS_PROPRES", "fonds propres"),
+        ("CAF", "CAF"),
+        ("FDR", "fonds de roulement"),
+    ):
+        element = elements_by_code.get(code)
+        if not element:
+            continue
+        if element.detection_status in {"ambiguous", "conflicting", "incomplete", "estimated"}:
+            invalid_values.append(f"{label} ({element.detection_status})")
+        elif element.validation and element.validation.status in {"invalidated", "divergent", "failed"}:
+            invalid_values.append(f"{label} ({element.validation.status})")
 
     if (
         extraction.completeness_pct < SCORING_MIN_COMPLETENESS_PCT
         or missing_sections
         or missing_values
+        or invalid_values
     ):
         details: list[str] = [
             f"complétude {extraction.completeness_pct:.1f}% "
@@ -110,6 +134,8 @@ def _scoring_block_reason(
             details.append("sections absentes : " + ", ".join(missing_sections))
         if missing_values:
             details.append("données absentes : " + ", ".join(missing_values))
+        if invalid_values:
+            details.append("données non fiables : " + ", ".join(invalid_values))
         return (
             "Scoring non lancé : extraction insuffisante ("
             + " ; ".join(details)
@@ -265,17 +291,23 @@ async def extract_and_score(
         sector_medians=comp.sector_medians,
     )
     scoring = await evaluate_scoring(scoring_request)
+    eligibility = evaluate_extraction_eligibility(
+        extraction,
+        {k: v.model_dump() for k, v in scoring.ratios.items()},
+        comp.behavioral_data or BehavioralMetricsInput(),
+    )
+    scoring.eligibility = scoring.eligibility or eligibility
 
     if scoring_block_reason:
         # Les ratios disponibles restent utiles à l'analyste, mais une
         # décision automatique est interdite tant que les bases financières
         # essentielles restent absentes.
         scoring.decision = DecisionOutput(
-            score=0.0,
-            classe="N/A",
-            decision="Analyse partielle — validation manuelle requise",
+            score=None,
+            classe="Non évaluable",
+            decision="Revue manuelle",
             recommandation=scoring_block_reason,
-            blocking_status="MANUAL_REVIEW",
+            blocking_status="INSUFFICIENT_DATA",
         )
         return ExtractAndScoreResponse(
             extraction=extraction,

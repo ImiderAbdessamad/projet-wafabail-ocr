@@ -49,6 +49,19 @@ class BehavioralMetricsInput(BaseModel):
     engagements_honores: Optional[bool] = None
 
 
+class ScoringEligibilityOutput(BaseModel):
+    eligible: bool
+    mode: str
+    blocking_reasons: List[str] = []
+    warnings: List[str] = []
+    financial_coverage: float = 0.0
+    behavioral_coverage: float = 0.0
+    sector_coverage: float = 0.0
+    ratios_expected: int = 0
+    ratios_calculable: int = 0
+    ratio_coverage: float = 0.0
+
+
 class ScoringRequest(BaseModel):
     bam_cotation: Optional[int] = None
     financial_data: FinancialDataInput
@@ -78,7 +91,7 @@ class AxeScore(BaseModel):
 
 
 class DecisionOutput(BaseModel):
-    score: float
+    score: Optional[float] = None
     classe: str
     decision: str
     recommandation: str
@@ -98,3 +111,4 @@ class ScoringResponse(BaseModel):
     axe3: AxeScore
     decision: DecisionOutput
     synthese: SyntheseOutput
+    eligibility: Optional[ScoringEligibilityOutput] = None

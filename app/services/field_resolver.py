@@ -53,9 +53,9 @@ def observations_from_page_payload(
     """Convertit une réponse Vision (format lignes/colonnes ou legacy flat) en observations."""
     observations: list[RawFinancialObservation] = []
     section = (payload.get("page_type") or payload.get("section") or "AUTRE").upper()
-    if section == "ESG":
-        section = "AUTRE"
     table_title = payload.get("table_title")
+    page_orientation = payload.get("orientation")
+    region_id = payload.get("region_id")
 
     # --- Format structuré (préféré) -----------------------------------------
     rows = payload.get("rows") or []
@@ -69,6 +69,8 @@ def observations_from_page_payload(
         if not values and empty:
             observations.append(
                 RawFinancialObservation(
+                    observation_id=f"p{page_num}-r{row_idx}-empty",
+                    region_id=region_id,
                     page=page_num,
                     section=section,
                     table_title=table_title,
@@ -80,6 +82,8 @@ def observations_from_page_payload(
                     line_present_empty=True,
                     extraction_method=extraction_method,
                     model_confidence=row.get("confidence"),
+                    orientation=page_orientation,
+                    warnings=row.get("warnings") or [],
                 )
             )
             continue
@@ -96,6 +100,8 @@ def observations_from_page_payload(
             parsed = parse_amount(raw_val)
             observations.append(
                 RawFinancialObservation(
+                    observation_id=f"p{page_num}-r{row_idx}-c{normalize_label(str(col_name))}",
+                    region_id=region_id,
                     page=page_num,
                     section=section,
                     table_title=table_title,
@@ -109,6 +115,8 @@ def observations_from_page_payload(
                     line_present_empty=parsed is None and empty,
                     extraction_method=extraction_method,
                     model_confidence=row.get("confidence"),
+                    orientation=page_orientation,
+                    warnings=row.get("warnings") or [],
                 )
             )
 
@@ -119,6 +127,7 @@ def observations_from_page_payload(
             continue
         observations.append(
             RawFinancialObservation(
+                observation_id=f"p{page_num}-meta-{key}",
                 page=page_num,
                 section="IDENTIFICATION",
                 raw_label=str(key),
@@ -127,6 +136,7 @@ def observations_from_page_payload(
                 parsed_value=None,
                 value_nature="unknown",
                 extraction_method=extraction_method,
+                orientation=page_orientation,
             )
         )
 
@@ -143,6 +153,7 @@ def observations_from_page_payload(
             parsed = parse_amount(raw_val)
             observations.append(
                 RawFinancialObservation(
+                    observation_id=f"p{page_num}-legacy-{code}",
                     page=page_num,
                     section=section,
                     raw_label=label,
@@ -153,6 +164,7 @@ def observations_from_page_payload(
                     line_present_empty=code in empty_fields and parsed is None,
                     extraction_method=f"{extraction_method}_legacy_flat",
                     model_confidence=0.55 if parsed is not None else None,
+                    orientation=page_orientation,
                 )
             )
             # Annoter le code via table_title pour matching exact code
@@ -305,10 +317,18 @@ def resolve_field(
             reason += f" | conflit avec {second.value} (score={second.score:.2f})"
 
     confidence = min(0.99, max(0.35, best.score))
+    model_confidence = None
+    extraction_confidence = best.score
+    cross_source_agreement = 1.0 if best.match_method == "exact_code" else 0.65
+    conflict_penalty = 0.0
     if status == "ambiguous":
         confidence = min(confidence, 0.55)
+        conflict_penalty = 0.25
     if best.column in ("unknown", None):
         confidence = min(confidence, 0.65)
+    if best.observation and best.observation.get("model_confidence") is not None:
+        model_confidence = float(best.observation["model_confidence"])
+        confidence = round((confidence + model_confidence) / 2, 4)
 
     logger.info(
         "field_resolve code=%s value=%s status=%s reason=%s",
@@ -331,6 +351,10 @@ def resolve_field(
         column=best.column,
         page=best.page,
         source=best.source,
+        model_confidence=model_confidence,
+        extraction_confidence=extraction_confidence,
+        cross_source_agreement=cross_source_agreement,
+        conflict_penalty=conflict_penalty,
     )
 
 

@@ -68,8 +68,17 @@ def score_axe1_from_ratios(ratios: Dict[str, dict]) -> dict:
     score = 100.0
     score -= AXE1_PENALTY_SURVEILLER * len(surveiller)
     score -= AXE1_PENALTY_NON_CONFORME * len(non_conformes)
+    score_before_coverage = max(0.0, round(score, 2))
+    ratio_coverage = round((len(scored) - len(non_calculables)) / max(len(scored), 1), 4)
+    if non_calculables:
+        score *= ratio_coverage
     return {
         "score": max(0.0, round(score, 2)),
+        "score_before_coverage": score_before_coverage,
+        "score_after_coverage": max(0.0, round(score, 2)),
+        "ratio_coverage": ratio_coverage,
+        "ratios_expected": len(scored),
+        "ratios_calculables": len(scored) - len(non_calculables),
         "ratios_conformes": [
             k for k, r in ratios.items() if r["status"] == "Conforme"
         ],
@@ -90,6 +99,7 @@ def score_axe2_behavioral(
     utilisation_decouvert_pct: float | None = None,
     ecart_flux_ca_pct: float | None = None,
     engagements_honores: bool | None = None,
+    provided_fields: set[str] | None = None,
 ) -> dict:
     """Rubrique comportementale calibrée sur le document (§2).
 
@@ -98,6 +108,42 @@ def score_axe2_behavioral(
     """
     score = 100.0
     signals: list[str] = []
+    missing_metrics: list[str] = []
+
+    provided_fields = provided_fields or set()
+    provided = {
+        "domiciliation_ca_pct": domiciliation_ca_pct,
+        "jours_debit": jours_debit,
+        "utilisation_decouvert_pct": utilisation_decouvert_pct,
+        "ecart_flux_ca_pct": ecart_flux_ca_pct,
+        "engagements_honores": engagements_honores,
+    }
+    count_metrics = 3 + len(provided)
+    provided_count = 0
+    if "incidents_paiement" in provided_fields:
+        provided_count += 1
+    if "rejets_prelevement" in provided_fields:
+        provided_count += 1
+    if "effets_impayes" in provided_fields:
+        provided_count += 1
+    for key, value in provided.items():
+        if key in provided_fields and value is not None:
+            provided_count += 1
+        else:
+            missing_metrics.append(key)
+
+    if provided_count == 0:
+        return {
+            "score": None,
+            "status": "not_provided",
+            "coverage": 0.0,
+            "signaux": ["Données comportementales non renseignées."],
+            "missing_metrics": list(provided.keys()) + [
+                "incidents_paiement",
+                "rejets_prelevement",
+                "effets_impayes",
+            ],
+        }
 
     if incidents_paiement > 0:
         score -= 40.0
@@ -133,7 +179,16 @@ def score_axe2_behavioral(
         score -= 20.0
         signals.append("Retards constatés sur les engagements de leasing en cours")
 
-    return {"score": max(0.0, round(score, 2)), "signaux": signals}
+    coverage = round(provided_count / count_metrics, 4)
+    if coverage < 1.0:
+        signals.append("Couverture comportementale partielle.")
+    return {
+        "score": max(0.0, round(score, 2)),
+        "status": "partial" if coverage < 1.0 else "provided",
+        "coverage": coverage,
+        "signaux": signals,
+        "missing_metrics": missing_metrics,
+    }
 
 
 # --- Axe 3 : score sectoriel (comparaison à la médiane du panel) ---
