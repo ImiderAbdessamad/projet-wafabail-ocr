@@ -216,11 +216,15 @@ async def extract_liasse(
     ),
     service: LiasseExtractionService = Depends(get_liasse_extraction_service),
 ) -> LiasseExtractionResult:
-    """Extraction structurée d'une liasse fiscale par OCR vision (Ollama GLM).
+    """Extraction structurée d'une liasse fiscale.
 
-    Accepte un PDF direct ou une archive ZIP. Pour un ZIP, utilisez
-    `pdf_entry` pour choisir le PDF à analyser, ou laissez vide pour
-    sélectionner automatiquement le document le plus complet.
+    Pipeline unifié :
+    - PDF texte natif → observations natives → résolution → scoring_input
+    - PDF scanné → OCR Vision GLM Flash (serveur Ollama distant `.env`) →
+      observations → résolution → scoring_input
+
+    Le modèle n'est **pas** local : il est appelé via `OLLAMA_URL` /
+    `OLLAMA_VISION_MODEL` (ex. GLM-4.6V-Flash sur NiceGPU).
     """
     content, filename = await _read_upload(file, pdf_entry)
     try:
@@ -239,7 +243,11 @@ async def extract_and_score(
     ),
     service: LiasseExtractionService = Depends(get_liasse_extraction_service),
 ) -> ExtractAndScoreResponse:
-    """Pipeline complet : extraction OCR + ratios + scoring 3 axes."""
+    """Pipeline complet API scoring : extraction OCR distant + ratios + 3 axes.
+
+    Même moteur Vision que `/extraction/liasse` (GLM Flash via Ollama distant),
+    puis scoring métier.
+    """
     content, filename = await _read_upload(file, pdf_entry)
     try:
         extraction = await extract_liasse_document(content, filename, service)

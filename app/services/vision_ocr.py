@@ -26,6 +26,8 @@ from app.config import (
     OCR_PAGE_DELAY_SECONDS,
     OCR_RETRY_ATTEMPTS,
     OCR_RETRY_DELAY_SECONDS,
+    OCR_SOFT_WARMUP,
+    OCR_VISION_NUM_PREDICT,
     OLLAMA_TIMEOUT_SECONDS,
     OLLAMA_URL,
     OLLAMA_VISION_MODEL,
@@ -154,40 +156,76 @@ def render_pdf_pages(data: bytes, max_pages: int | None = None) -> list[bytes]:
     return [_downscale_jpeg(page, MAX_IMAGE_DIMENSION) for page in pages]
 
 
-async def _warmup_model() -> None:
-    """Vérifie le modèle puis le préchauffe avant un document.
+async def _warmup_model(*, soft: bool | None = None) -> dict[str, Any]:
+    """Vérifie le modèle distant puis tente un préchauffage.
 
-    GLM-4.6V peut produire une sortie vide sur un prompt de préchauffage
-    minimal ; on vérifie donc l'existence du modèle et la disponibilité
-    HTTP, puis les appels réels aux pages appliquent les retries/validations.
+    Sur un serveur Ollama distant, le préchauffage texte peut renvoyer 504
+    alors que le chat vision fonctionne ensuite. En mode soft (défaut),
+    on ne bloque pas l'extraction.
     """
     global _model_warmed
+    soft_mode = OCR_SOFT_WARMUP if soft is None else soft
+    status: dict[str, Any] = {
+        "ollama_url": OLLAMA_URL,
+        "model": OLLAMA_VISION_MODEL,
+        "warmed": _model_warmed,
+        "reachable": False,
+        "model_present": False,
+        "warmup": "skipped" if _model_warmed else "pending",
+    }
     if _model_warmed:
-        return
+        status["reachable"] = True
+        status["model_present"] = True
+        status["warmup"] = "cached"
+        return status
 
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             tags_response = await client.get(f"{OLLAMA_URL}/api/tags")
             tags_response.raise_for_status()
+            status["reachable"] = True
             models = tags_response.json().get("models", [])
             names = {model.get("name") for model in models if model.get("name")}
             if OLLAMA_VISION_MODEL not in names:
                 raise VisionOcrError(
-                    f"Le modèle « {OLLAMA_VISION_MODEL} » est absent du serveur Ollama."
+                    f"Le modèle « {OLLAMA_VISION_MODEL} » est absent du serveur Ollama "
+                    f"({OLLAMA_URL}). Disponibles : {sorted(names)}"
                 )
+            status["model_present"] = True
 
-            response = await client.post(
-                f"{OLLAMA_URL}/api/generate",
-                json={
-                    "model": OLLAMA_VISION_MODEL,
-                    "prompt": "ok",
-                    "stream": False,
-                    "options": {"num_predict": 1},
-                },
-            )
-            response.raise_for_status()
+            try:
+                # Timeout court pour le warmup : un 504 gateway distant
+                # ne doit pas bloquer l'API pendant OLLAMA_TIMEOUT (souvent 300s).
+                warmup_timeout = httpx.Timeout(connect=15.0, read=25.0, write=15.0, pool=15.0)
+                async with httpx.AsyncClient(timeout=warmup_timeout) as warm_client:
+                    response = await warm_client.post(
+                        f"{OLLAMA_URL}/api/generate",
+                        json={
+                            "model": OLLAMA_VISION_MODEL,
+                            "prompt": "ok",
+                            "stream": False,
+                            "options": {"num_predict": 1},
+                            "keep_alive": "30m",
+                        },
+                    )
+                if response.status_code in {500, 502, 503, 504}:
+                    raise VisionOcrError(
+                        f"Pré-vérification Ollama HTTP {response.status_code}"
+                    )
+                response.raise_for_status()
+                status["warmup"] = "ok"
+            except Exception as warmup_exc:  # noqa: BLE001
+                status["warmup"] = f"degraded:{warmup_exc}"
+                if not soft_mode:
+                    raise VisionOcrError(str(warmup_exc)) from warmup_exc
+                logger.warning(
+                    "Warmup Ollama dégradé (extraction poursuivie) : %s",
+                    warmup_exc,
+                )
         _model_warmed = True
-        logger.info("Modèle %s préchauffé.", OLLAMA_VISION_MODEL)
+        logger.info("Modèle %s prêt (warmup=%s).", OLLAMA_VISION_MODEL, status["warmup"])
+        status["warmed"] = True
+        return status
     except VisionOcrError:
         raise
     except httpx.HTTPStatusError as exc:
@@ -197,7 +235,7 @@ async def _warmup_model() -> None:
         ) from exc
     except httpx.HTTPError as exc:
         raise VisionOcrError(
-            f"Pré-vérification Ollama impossible : {exc}"
+            f"Pré-vérification Ollama impossible ({OLLAMA_URL}) : {exc}"
         ) from exc
     except Exception as exc:
         raise VisionOcrError(f"Pré-vérification Ollama impossible : {exc}") from exc
@@ -249,13 +287,24 @@ async def _vision_call_once(
         ],
         "format": "json",
         "stream": False,
-        "options": {"temperature": 0},
+        "keep_alive": "30m",
+        "options": {
+            "temperature": 0,
+            "num_predict": OCR_VISION_NUM_PREDICT,
+        },
     }
 
     try:
         async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT) as client:
             response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            response.raise_for_status()
+        if response.status_code in {500, 502, 503, 504}:
+            raise VisionOcrError(
+                f"Ollama HTTP {response.status_code} page {page_num} : "
+                f"{response.text[:180]}"
+            )
+        response.raise_for_status()
+    except VisionOcrError:
+        raise
     except httpx.ConnectError as exc:
         raise VisionOcrError(
             f"Impossible de contacter Ollama ({OLLAMA_URL}). Vérifiez .env."
@@ -268,7 +317,12 @@ async def _vision_call_once(
     except httpx.TimeoutException as exc:
         raise VisionOcrError(f"Timeout Ollama page {page_num}.") from exc
 
-    body = response.json()
+    try:
+        body = response.json()
+    except ValueError as exc:
+        raise VisionOcrError(
+            f"Réponse non-JSON Ollama page {page_num} (HTTP {response.status_code})."
+        ) from exc
     raw_content = (body.get("message") or {}).get("content", "").strip()
     if not raw_content:
         raise VisionOcrError(f"Réponse vide page {page_num}.")
@@ -282,7 +336,7 @@ def _is_retryable_error(exc: VisionOcrError) -> bool:
         token in msg
         for token in (
             "504", "502", "503", "500", "timeout", "vide",
-            "illisible", "500 level", "gateway",
+            "illisible", "500 level", "gateway", "non-json",
         )
     )
 
@@ -298,9 +352,11 @@ async def _vision_call(
     last_exc: VisionOcrError | None = None
 
     for attempt in range(attempts):
-        img = image_bytes
-        if attempt >= 1:
-            img = _downscale_jpeg(image_bytes, max(800, 1100 - attempt * 150), quality=75)
+        if attempt == 0:
+            img = image_bytes
+        else:
+            dim = max(640, 1000 - attempt * 120)
+            img = _downscale_jpeg(image_bytes, dim, quality=70)
 
         try:
             return await _vision_call_once(img, page_num, total_pages)
@@ -498,10 +554,15 @@ async def _retry_failed_pages(
 async def extract_liasse_via_vision(
     content: bytes, filename: str | None = None
 ) -> LiasseExtractionResult:
-    """Extraction OCR vision avec pipeline observation → résolution → validation."""
+    """Extraction OCR vision avec pipeline observation → résolution → validation.
+
+    Utilisé par l'API `/api/v1/extraction/liasse` et `/liasse/score` via
+    `extract_liasse_document()` — le modèle GLM Flash est appelé sur le
+    serveur Ollama distant configuré dans `.env` (pas local).
+    """
     async with _OCR_JOB_LOCK:
         t0 = time.perf_counter()
-        await _warmup_model()
+        warmup_status = await _warmup_model(soft=True)
 
         pages_total = count_pdf_pages(content)
         page_images = render_pdf_pages(content)
@@ -511,8 +572,16 @@ async def extract_liasse_via_vision(
         page_results = await _retry_failed_pages(page_images, page_results, total_to_analyze)
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        return _assemble_from_page_results(
+        result = _assemble_from_page_results(
             page_results, pages_total, elapsed_ms, filename
         )
+        result.warnings = [
+            (
+                f"OCR Vision distant : model={OLLAMA_VISION_MODEL} "
+                f"url={OLLAMA_URL} warmup={warmup_status.get('warmup')}"
+            ),
+            *list(result.warnings or []),
+        ]
+        return result
 
 

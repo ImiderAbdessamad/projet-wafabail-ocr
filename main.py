@@ -84,14 +84,14 @@ async def ollama_health() -> dict:
     from app.services.vision_ocr import VisionOcrError, _warmup_model
 
     try:
-        await _warmup_model()
+        status = await _warmup_model(soft=True)
     except VisionOcrError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    degraded = str(status.get("warmup", "")).startswith("degraded")
     return {
-        "status": "ok",
-        "ollama_url": OLLAMA_URL,
-        "model": OLLAMA_VISION_MODEL,
+        "status": "degraded" if degraded else "ok",
+        **status,
     }
 
 
