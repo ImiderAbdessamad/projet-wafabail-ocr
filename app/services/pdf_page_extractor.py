@@ -19,7 +19,10 @@ from app.schemas.pdf_extraction import (
     PdfContentExtractionResult,
     PdfPageExtraction,
 )
-from app.services.page_preprocessor import rotate_image_bytes
+from app.services.page_preprocessor import (
+    crop_content_regions,
+    rotate_image_bytes,
+)
 from app.services.vision_client import VisionExtractionError, vision_chat_text
 from app.services.vision_ocr import (
     VisionOcrError,
@@ -32,62 +35,21 @@ from app.services.vision_ocr import (
 logger = logging.getLogger(__name__)
 
 _CONTENT_SYSTEM_PROMPT = """
-Tu es un moteur OCR spécialisé dans les documents administratifs,
-comptables, fiscaux et financiers.
+Tu es un moteur OCR de documents administratifs, fiscaux et comptables.
 
-Ta mission est de transcrire fidèlement la page fournie sous forme de
-Markdown lisible, tout en conservant autant que possible son organisation
-visuelle.
+Transcris fidèlement la page en Markdown.
 
-RÈGLES OBLIGATOIRES :
-
-1. Retourne uniquement du Markdown brut.
-2. Ne retourne aucun JSON.
-3. N'ajoute pas de bloc ```markdown.
-4. Ne résume pas le document.
-5. Ne calcule aucune valeur.
-6. Ne corrige aucun montant.
-7. N'interprète pas les informations.
-8. N'invente aucune information.
-9. Respecte l'ordre de lecture de la page.
-10. Conserve fidèlement :
-    - les titres ;
-    - les sous-titres ;
-    - les paragraphes ;
-    - les libellés ;
-    - les montants ;
-    - les dates ;
-    - les références ;
-    - les identifiants ;
-    - les numéros fiscaux ;
-    - les notes de bas de page.
-11. Utilise les titres Markdown :
-    # titre principal
-    ## section
-    ### sous-section
-12. Représente les tableaux avec la syntaxe Markdown :
-    | Colonne 1 | Colonne 2 |
-    |---|---|
-    | Valeur 1 | Valeur 2 |
-13. Associe chaque valeur à la bonne ligne et à la bonne colonne.
-14. Ne déplace jamais une valeur vers une autre ligne.
-15. Ne supprime pas les valeurs égales à 0 ou 0,00.
-16. Pour une cellule vide, laisse la cellule vide.
-17. Pour une zone réellement illisible, écris [illisible].
-18. Si une page est tournée, lis-la dans son orientation correcte.
-19. Ne répète pas le tableau une seconde fois sous forme de texte.
-20. Si la page est vide, retourne exactement :
-    [PAGE VIDE]
-
-Pour les tableaux comptables :
-- conserve les en-têtes de colonnes ;
-- conserve les sections ;
-- conserve les sous-totaux ;
-- conserve les totaux ;
-- conserve les séparateurs de milliers ;
-- conserve les virgules décimales ;
-- conserve les signes négatifs ;
-- ne fusionne pas plusieurs lignes distinctes.
+Règles :
+- Retourne uniquement du Markdown brut, sans JSON et sans bloc de code.
+- Ne résume pas, ne calcule pas et n'interprète rien.
+- Conserve les titres, paragraphes, dates, références, identifiants et montants.
+- Conserve l'ordre de lecture.
+- Représente les tableaux en Markdown avec chaque valeur dans la bonne colonne.
+- Conserve les lignes à 0 ou 0,00.
+- Laisse une cellule vide si elle est vide.
+- Écris [illisible] uniquement lorsqu'une zone est réellement illisible.
+- Ne répète pas un tableau sous forme de texte après sa transcription.
+- Si la page est vide, retourne exactement [PAGE VIDE].
 """
 
 
@@ -138,18 +100,128 @@ def _looks_like_table(page: fitz.Page) -> bool:
     return horizontal_or_vertical_lines >= 8 and len(words) >= 20
 
 
+def _page_has_large_image(page: fitz.Page) -> bool:
+    """Indique si la page PDF contient une image couvrant une grande zone."""
+    try:
+        images = page.get_images(full=True)
+    except Exception:
+        return False
+
+    if not images:
+        return False
+
+    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+
+    for image in images:
+        try:
+            xref = image[0]
+            rects = page.get_image_rects(xref)
+        except Exception:
+            continue
+
+        for rect in rects:
+            image_area = float(rect.width * rect.height)
+            if image_area / page_area >= 0.45:
+                return True
+
+    return False
+
+
+def _should_use_vision(
+    page: fitz.Page,
+    native_text: str,
+    *,
+    force_vision: bool,
+) -> bool:
+    """Décide si une page doit être envoyée au modèle Vision."""
+    if force_vision:
+        return True
+
+    normalized_chars = len(native_text.replace(" ", "").replace("\n", ""))
+
+    if normalized_chars < MIN_NATIVE_TEXT_CHARS:
+        return True
+
+    if _page_has_large_image(page):
+        return True
+
+    if _looks_like_table(page):
+        return True
+
+    return False
+
+
+def _normalize_merge_line(line: str) -> str:
+    """Normalise une ligne uniquement pour la comparaison."""
+    return " ".join(line.strip().lower().split())
+
+
+def _merge_markdown_regions(region_contents: list[str]) -> str:
+    """Fusionne plusieurs transcriptions Markdown en supprimant les doublons."""
+    merged_lines: list[str] = []
+    seen_recent: list[str] = []
+
+    for content in region_contents:
+        if not content:
+            continue
+
+        lines = content.strip().splitlines()
+
+        for line in lines:
+            normalized = _normalize_merge_line(line)
+
+            if not normalized:
+                if merged_lines and merged_lines[-1] != "":
+                    merged_lines.append("")
+                continue
+
+            if normalized in seen_recent:
+                continue
+
+            merged_lines.append(line.rstrip())
+
+            seen_recent.append(normalized)
+            if len(seen_recent) > 40:
+                seen_recent.pop(0)
+
+    while merged_lines and not merged_lines[-1]:
+        merged_lines.pop()
+
+    return "\n".join(merged_lines).strip()
+
+
+def _vision_output_is_insufficient(markdown: str) -> bool:
+    """Détecte une sortie Vision manifestement insuffisante."""
+    content = markdown.strip()
+
+    if content == "[PAGE VIDE]":
+        return False
+
+    if len(content) < 120:
+        return True
+
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+
+    if len(lines) < 4:
+        return True
+
+    return False
+
+
 def _vision_page_result(
     page_number: int,
     markdown_content: str,
     elapsed_ms: float,
     *,
     rotation_fallback: int | None = None,
+    extraction_strategy: str = "full_page",
 ) -> PdfPageExtraction:
     is_empty = markdown_content.strip() == "[PAGE VIDE]"
     meta: dict = {
         "output_format": "markdown",
         "layout_preserved": True,
         "table_format": "markdown",
+        "extraction_strategy": extraction_strategy,
     }
     if is_empty:
         meta["page_empty"] = True
@@ -167,6 +239,46 @@ def _vision_page_result(
         model_latency_ms=int(elapsed_ms),
         raw_model_response=meta,
     )
+
+
+async def _extract_page_regions(
+    *,
+    image_bytes: bytes,
+    page_number: int,
+    total_pages: int,
+) -> tuple[str, float]:
+    """Extrait une page par zones haute et basse puis fusionne le Markdown."""
+    region_images = crop_content_regions(image_bytes)
+
+    region_contents: list[str] = []
+    total_latency_ms = 0.0
+
+    for region_id, region_image in region_images:
+        markdown, elapsed_ms = await vision_chat_text(
+            image_bytes=region_image,
+            system_prompt=_CONTENT_SYSTEM_PROMPT,
+            user_message=(
+                f"Page {page_number}/{total_pages}, zone {region_id}. "
+                "Transcris uniquement le contenu visible dans cette zone. "
+                "Conserve les tableaux et ne répète pas les informations "
+                "qui ne sont pas visibles dans cette zone."
+            ),
+            model=OLLAMA_VISION_MODEL,
+            num_predict=8192,
+            max_attempts=2,
+        )
+
+        total_latency_ms += elapsed_ms
+
+        if markdown.strip() != "[PAGE VIDE]":
+            region_contents.append(markdown)
+
+    merged = _merge_markdown_regions(region_contents)
+
+    if not merged:
+        return "[PAGE VIDE]", total_latency_ms
+
+    return merged, total_latency_ms
 
 
 async def extract_pdf_content_by_page(
@@ -204,13 +316,13 @@ async def extract_pdf_content_by_page(
                 page_number = idx + 1
                 page = doc[idx]
                 native_text = _native_page_text(doc, idx)
-                page_has_table = _looks_like_table(page)
 
-                use_native = (
-                    not force_vision
-                    and not page_has_table
-                    and len(native_text.strip()) >= MIN_NATIVE_TEXT_CHARS
+                use_vision = _should_use_vision(
+                    page,
+                    native_text,
+                    force_vision=force_vision,
                 )
+                use_native = not use_vision
 
                 if use_native:
                     page_results.append(
@@ -221,75 +333,133 @@ async def extract_pdf_content_by_page(
                             content=native_text,
                             tables=[],
                             char_count=len(native_text),
+                            raw_model_response={
+                                "output_format": "plain_text",
+                                "layout_preserved": "partial",
+                                "extraction_strategy": "native",
+                            },
                         )
                     )
-                    continue
+                else:
+                    if page_images is None:
+                        try:
+                            page_images = render_pdf_pages(content, max_pages=limit)
+                        except VisionOcrError as exc:
+                            raise VisionExtractionError(str(exc)) from exc
 
-                if page_images is None:
-                    try:
-                        page_images = render_pdf_pages(content, max_pages=limit)
-                    except VisionOcrError as exc:
-                        raise VisionExtractionError(str(exc)) from exc
+                    image_bytes = page_images[idx]
 
-                image_bytes = page_images[idx]
-                user_message = (
-                    f"Page {page_number}/{limit}. "
-                    "Transcris tout le contenu visible en Markdown structuré. "
-                    "Préserve fidèlement les titres, les paragraphes, "
-                    "les tableaux, les colonnes et les lignes."
-                )
-                try:
-                    markdown_content, elapsed_ms = await vision_chat_text(
-                        image_bytes=image_bytes,
-                        system_prompt=_CONTENT_SYSTEM_PROMPT,
-                        user_message=user_message,
-                        model=OLLAMA_VISION_MODEL,
-                        num_predict=8192,
-                        max_attempts=3,
-                    )
-                    page_results.append(
-                        _vision_page_result(
-                            page_number, markdown_content, elapsed_ms
-                        )
-                    )
-                except VisionExtractionError as exc:
-                    logger.warning("Vision page %d échouée : %s", page_number, exc)
                     try:
-                        rotated_image = rotate_image_bytes(image_bytes, 90)
                         markdown_content, elapsed_ms = await vision_chat_text(
-                            image_bytes=rotated_image,
+                            image_bytes=image_bytes,
                             system_prompt=_CONTENT_SYSTEM_PROMPT,
                             user_message=(
                                 f"Page {page_number}/{limit}. "
-                                "Cette page peut être tournée. "
-                                "Lis-la dans le bon sens et transcris-la en Markdown structuré."
+                                "Transcris fidèlement tout le contenu visible en Markdown."
                             ),
                             model=OLLAMA_VISION_MODEL,
-                            num_predict=8192,
+                            num_predict=12288,
                             max_attempts=2,
                         )
-                        page_results.append(
-                            _vision_page_result(
+
+                        if _vision_output_is_insufficient(markdown_content):
+                            logger.info(
+                                "Sortie pleine page insuffisante page %d, fallback régional.",
                                 page_number,
-                                markdown_content,
-                                elapsed_ms,
-                                rotation_fallback=90,
                             )
-                        )
-                    except VisionExtractionError as rotated_exc:
-                        logger.warning(
-                            "Vision page %d échouée même après rotation : %s",
-                            page_number,
-                            rotated_exc,
-                        )
-                        page_results.append(
-                            PdfPageExtraction(
+                            markdown_content, regional_latency = await _extract_page_regions(
+                                image_bytes=image_bytes,
                                 page_number=page_number,
-                                status="error",
-                                extraction_mode="vision",
-                                error=str(rotated_exc),
+                                total_pages=limit,
                             )
+                            elapsed_ms += regional_latency
+                            page_results.append(
+                                _vision_page_result(
+                                    page_number,
+                                    markdown_content,
+                                    elapsed_ms,
+                                    extraction_strategy="regions",
+                                )
+                            )
+                        else:
+                            page_results.append(
+                                _vision_page_result(
+                                    page_number,
+                                    markdown_content,
+                                    elapsed_ms,
+                                    extraction_strategy="full_page",
+                                )
+                            )
+
+                    except VisionExtractionError as full_page_exc:
+                        logger.warning(
+                            "Vision pleine page %d échouée : %s",
+                            page_number,
+                            full_page_exc,
                         )
+                        try:
+                            markdown_content, elapsed_ms = await _extract_page_regions(
+                                image_bytes=image_bytes,
+                                page_number=page_number,
+                                total_pages=limit,
+                            )
+                            page_results.append(
+                                _vision_page_result(
+                                    page_number,
+                                    markdown_content,
+                                    elapsed_ms,
+                                    extraction_strategy="regions",
+                                )
+                            )
+                        except VisionExtractionError as regional_exc:
+                            logger.warning(
+                                "Fallback régional page %d échoué : %s",
+                                page_number,
+                                regional_exc,
+                            )
+                            try:
+                                rotated_image = rotate_image_bytes(image_bytes, 90)
+                                markdown_content, elapsed_ms = await vision_chat_text(
+                                    image_bytes=rotated_image,
+                                    system_prompt=_CONTENT_SYSTEM_PROMPT,
+                                    user_message=(
+                                        f"Page {page_number}/{limit}. "
+                                        "La page a été tournée de 90 degrés. "
+                                        "Transcris fidèlement son contenu en Markdown."
+                                    ),
+                                    model=OLLAMA_VISION_MODEL,
+                                    num_predict=12288,
+                                    max_attempts=2,
+                                )
+                                page_results.append(
+                                    _vision_page_result(
+                                        page_number,
+                                        markdown_content,
+                                        elapsed_ms,
+                                        rotation_fallback=90,
+                                        extraction_strategy="rotation_90",
+                                    )
+                                )
+                            except VisionExtractionError as rotated_exc:
+                                logger.warning(
+                                    "Vision page %d échouée après tous les fallbacks : %s",
+                                    page_number,
+                                    rotated_exc,
+                                )
+                                page_results.append(
+                                    PdfPageExtraction(
+                                        page_number=page_number,
+                                        status="error",
+                                        extraction_mode="vision",
+                                        content=None,
+                                        tables=[],
+                                        char_count=0,
+                                        error=(
+                                            "Extraction pleine page, régionale et rotation 90° "
+                                            f"échouées : {rotated_exc}"
+                                        ),
+                                    )
+                                )
 
                 if idx < limit - 1:
                     await asyncio.sleep(OCR_PAGE_DELAY_SECONDS)

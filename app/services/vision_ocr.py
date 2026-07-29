@@ -143,8 +143,13 @@ def render_pdf_pages(data: bytes, max_pages: int | None = None) -> list[bytes]:
         matrix = fitz.Matrix(PDF_TO_IMAGE_DPI / 72, PDF_TO_IMAGE_DPI / 72)
         pages = []
         for page in doc[: min(len(doc), limit)]:
-            rendered = page.get_pixmap(matrix=matrix).tobytes("jpeg")
-            preprocessed = preprocess_page_image(rendered, orientation=int(page.rotation or 0) % 360)
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            # PNG avant prétraitement : évite une double compression JPEG
+            # avant crop / rotation (ré-encodage JPEG ensuite).
+            rendered = pixmap.tobytes("png")
+            preprocessed = preprocess_page_image(
+                rendered, orientation=int(page.rotation or 0) % 360
+            )
             pages.append(preprocessed.image_bytes)
         doc.close()
     except Exception as exc:

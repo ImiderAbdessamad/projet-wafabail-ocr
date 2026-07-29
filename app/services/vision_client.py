@@ -151,7 +151,7 @@ async def vision_chat_text(
     model: str | None = None,
     *,
     timeout_seconds: float | None = None,
-    num_predict: int = 8192,
+    num_predict: int = 12288,
     max_attempts: int = 3,
 ) -> tuple[str, float]:
     """Envoie une image à Ollama et retourne une transcription Markdown."""
@@ -184,7 +184,7 @@ async def vision_chat_text(
 
     for attempt in range(1, max_attempts + 1):
         current_num_predict = min(
-            num_predict + ((attempt - 1) * 4096),
+            num_predict + ((attempt - 1) * 2048),
             16384,
         )
 
@@ -236,17 +236,20 @@ async def vision_chat_text(
 
             message = body.get("message") or {}
             raw_content = message.get("content") or body.get("response") or ""
+            done_reason = str(body.get("done_reason") or "").lower()
 
             logger.info(
                 (
                     "Vision Markdown attempt=%d/%d "
-                    "done=%r done_reason=%r eval_count=%r"
+                    "done=%r done_reason=%r eval_count=%r "
+                    "prompt_eval_count=%r"
                 ),
                 attempt,
                 max_attempts,
                 body.get("done"),
                 body.get("done_reason"),
                 body.get("eval_count"),
+                body.get("prompt_eval_count"),
             )
 
             markdown = _clean_markdown_response(raw_content)
@@ -254,7 +257,24 @@ async def vision_chat_text(
             if not markdown:
                 raise VisionExtractionError("Réponse vide du modèle Vision.")
 
-            if len(markdown) < 20 and markdown.strip() != "[PAGE VIDE]":
+            if markdown.strip() == "[PAGE VIDE]":
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                return markdown, elapsed_ms
+
+            if done_reason in {"length", "max_tokens"}:
+                logger.warning(
+                    "Réponse Vision potentiellement tronquée : done_reason=%s, caractères=%d",
+                    done_reason,
+                    len(markdown),
+                )
+                if len(markdown) >= 100:
+                    elapsed_ms = (time.perf_counter() - started) * 1000
+                    return markdown, elapsed_ms
+                raise VisionExtractionError(
+                    "Réponse Vision tronquée trop courte pour être exploitable."
+                )
+
+            if len(markdown) < 20:
                 raise VisionExtractionError(
                     "Réponse trop courte du modèle Vision."
                 )

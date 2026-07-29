@@ -272,4 +272,5 @@ def test_pdf_content_extraction_native():
     assert d["pages"][0]["content"]
     assert "\n" in d["pages"][0]["content"]
     assert d["pages"][0]["tables"] == []
+    assert d["pages"][0]["raw_model_response"]["extraction_strategy"] == "native"
     assert any("Markdown" in w for w in d["warnings"])
