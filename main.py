@@ -32,7 +32,7 @@ from app.config import (
     OLLAMA_VISION_MODEL,
     STATIC_DIR,
 )
-from app.routers import cin, export, extraction, ice, scoring
+from app.routers import cin, export, extraction, financial_analysis, ice, scoring
 from app.services.glm_extractor import warmup_model as warmup_vision_model
 from app.services.ice_extractor import warmup_model as warmup_text_model
 
@@ -62,6 +62,7 @@ app.add_middleware(
 app.include_router(cin.router)
 app.include_router(ice.router)
 app.include_router(extraction.router, prefix="/api/v1")
+app.include_router(financial_analysis.router, prefix="/api/v1")
 app.include_router(scoring.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
 
