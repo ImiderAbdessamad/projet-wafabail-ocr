@@ -19,12 +19,12 @@
     <header class="header">
       <div class="header-badge">
         <span class="dot"></span>
-        Ollama · GLM Vision · OCR
+        Ollama · GLM Vision · Analyse Decimal
       </div>
-      <h1>Extraction PDF page par page</h1>
+      <h1>Extraction PDF &amp; Analyse financière</h1>
       <p class="subtitle">
-        Déposez un PDF : chaque page est analysée par GLM Vision (ou texte natif si disponible).
-        Le contenu extrait s'affiche page par page pour relecture ou réutilisation.
+        Déposez un PDF : extraction Markdown page par page, puis calcul déterministe
+        des ratios et scoring crédit-bail (Decimal — sans calcul LLM).
       </p>
     </header>
 
@@ -62,8 +62,67 @@
           </label>
         </div>
 
-        <button type="button" id="extractBtn" class="btn-primary" disabled>Extraire le contenu</button>
+        <div class="mode-toggle">
+          <label class="mode-option">
+            <input type="radio" name="pdfMode" value="extract" checked />
+            <span>Extraction Markdown</span>
+          </label>
+          <label class="mode-option">
+            <input type="radio" name="pdfMode" value="analyze" />
+            <span>Extraction + Analyse / Scoring</span>
+          </label>
+        </div>
+
+        <details id="analyzeOptions" class="analyze-options" hidden>
+          <summary>Compléments scoring (comportemental &amp; secteur)</summary>
+          <p class="analyze-hint">
+            Optionnel. Sans ces données, l’axe comportemental / sectoriel reste
+            non calculable et la décision automatique est bloquée (mode STRICT).
+          </p>
+          <div class="override-grid">
+            <label>Mode scoring
+              <select id="scoringMode">
+                <option value="STRICT">STRICT</option>
+                <option value="REVIEW">REVIEW</option>
+              </select>
+            </label>
+            <label>Cotation BAM<input id="bamRating" type="number" min="1" max="10" step="1" /></label>
+            <label>Domiciliation CA %<input id="caDomPct" type="number" min="0" max="100" step="0.1" /></label>
+            <label>Jours débiteurs<input id="debitDays" type="number" min="0" step="1" /></label>
+            <label>Utilisation découvert %<input id="overdraftPct" type="number" min="0" max="100" step="0.1" /></label>
+            <label>Écart flux / CA %<input id="flowGapPct" type="number" step="0.1" /></label>
+            <label>Incidents paiement 24m<input id="incidents" type="number" min="0" step="1" /></label>
+            <label>Rejets 24m<input id="rejections" type="number" min="0" step="1" /></label>
+            <label>Effets impayés 24m<input id="unpaid" type="number" min="0" step="1" /></label>
+            <label>Retards leasing 24m<input id="leasingDelays" type="number" min="0" step="1" /></label>
+            <label>Secteur<input id="sectorName" type="text" placeholder="ex. Commerce" /></label>
+            <label>Médiane rentab. commerciale %<input id="medCommercial" type="number" step="0.01" /></label>
+            <label>Médiane autonomie %<input id="medAutonomy" type="number" step="0.01" /></label>
+            <label>Médiane endettement<input id="medDebt" type="number" step="0.01" /></label>
+            <label>Médiane rembours.<input id="medRepay" type="number" step="0.01" /></label>
+            <label>Médiane croissance CA %<input id="medGrowth" type="number" step="0.01" /></label>
+          </div>
+        </details>
+
+        <div class="pdf-actions">
+          <button type="button" id="extractBtn" class="btn-primary" disabled>Lancer</button>
+        </div>
         <p id="errorBox" class="error-box" hidden></p>
+      </section>
+
+      <section id="analysisPanel" class="card result-card" hidden>
+        <h2 class="section-title">Analyse financière</h2>
+        <div id="decisionCard" class="decision-card"></div>
+        <div id="axesGrid" class="axes-grid"></div>
+        <div id="analysisWarnings" class="warnings-box" hidden></div>
+        <h3 class="section-subtitle">Ratios</h3>
+        <div id="ratiosGrid" class="ratios-grid"></div>
+        <h3 class="section-subtitle">Champs extraits</h3>
+        <div id="datasetGrid" class="dataset-grid"></div>
+        <details class="pdf-raw">
+          <summary>JSON analyse complète</summary>
+          <pre id="analysisRawJson"></pre>
+        </details>
       </section>
 
       <section id="resultPanel" class="card result-card" hidden>

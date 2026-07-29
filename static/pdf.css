@@ -205,3 +205,91 @@
 .pdf-summary .warnings-box {
   margin-top: 12px;
 }
+
+.pdf-actions {
+  margin-top: 16px;
+}
+
+.analyze-options {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.analyze-options summary {
+  cursor: pointer;
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.analyze-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 10px 0 12px;
+  line-height: 1.45;
+}
+
+.analyze-options select {
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--card-border);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+}
+
+.section-title {
+  margin: 0 0 14px;
+  font-size: 1.15rem;
+}
+
+.section-subtitle {
+  margin: 20px 0 10px;
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+}
+
+.dataset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.dataset-card {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.dataset-card .field-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.dataset-card .field-value {
+  font-size: 15px;
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.dataset-card .field-status {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.status-confirmed { background: var(--success-bg); color: var(--success); }
+.status-derived { background: rgba(55, 211, 201, 0.15); color: var(--accent-2); }
+.status-missing { background: rgba(255, 255, 255, 0.08); color: var(--text-secondary); }
+.status-ambiguous,
+.status-conflicting,
+.status-invalid { background: var(--danger-bg); color: var(--danger); }
+
+.ratio-status.conforme { color: var(--success); }
+.ratio-status.a_surveiller { color: var(--warning); }
+.ratio-status.non_conforme { color: var(--danger); }
+.ratio-status.non_calculable { color: var(--text-secondary); }

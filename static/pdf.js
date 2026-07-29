@@ -9,6 +9,8 @@ const forceVisionInput = document.getElementById("forceVision");
 const extractBtn = document.getElementById("extractBtn");
 const errorBox = document.getElementById("errorBox");
 const resultPanel = document.getElementById("resultPanel");
+const analysisPanel = document.getElementById("analysisPanel");
+const analyzeOptions = document.getElementById("analyzeOptions");
 const fileBadge = document.getElementById("fileBadge");
 const pagesBadge = document.getElementById("pagesBadge");
 const timeBadge = document.getElementById("timeBadge");
@@ -24,10 +26,21 @@ const pageError = document.getElementById("pageError");
 const rawJsonBlock = document.getElementById("rawJsonBlock");
 const pageRawJson = document.getElementById("pageRawJson");
 const copyBtn = document.getElementById("copyBtn");
+const decisionCard = document.getElementById("decisionCard");
+const axesGrid = document.getElementById("axesGrid");
+const ratiosGrid = document.getElementById("ratiosGrid");
+const datasetGrid = document.getElementById("datasetGrid");
+const analysisWarnings = document.getElementById("analysisWarnings");
+const analysisRawJson = document.getElementById("analysisRawJson");
+const scoringModeSelect = document.getElementById("scoringMode");
 
 let selectedFile = null;
 let lastResult = null;
 let activePage = null;
+
+function getMode() {
+  return document.querySelector('input[name="pdfMode"]:checked')?.value || "extract";
+}
 
 function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} o`;
@@ -42,7 +55,26 @@ function clearError() {
 
 function showError(message) {
   errorBox.hidden = false;
-  errorBox.textContent = message;
+  errorBox.textContent =
+    typeof message === "string"
+      ? message
+      : Array.isArray(message)
+        ? message.map((m) => m.msg || m).join(" ; ")
+        : JSON.stringify(message);
+}
+
+function escapeHtml(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function formatAmount(value) {
+  if (value == null || value === "") return "—";
+  const n = Number(value);
+  if (Number.isNaN(n)) return String(value);
+  return n.toLocaleString("fr-FR", { maximumFractionDigits: 2 });
 }
 
 function setFile(file) {
@@ -56,8 +88,19 @@ function setFile(file) {
   previewFileName.textContent = file.name;
   previewFileSize.textContent = formatSize(file.size);
   extractBtn.disabled = false;
+  updateButtonLabel();
   clearError();
 }
+
+function updateButtonLabel() {
+  extractBtn.textContent =
+    getMode() === "analyze" ? "Extraire + Analyser" : "Extraire le contenu";
+  analyzeOptions.hidden = getMode() !== "analyze";
+}
+
+document.querySelectorAll('input[name="pdfMode"]').forEach((el) => {
+  el.addEventListener("change", updateButtonLabel);
+});
 
 dropzone.addEventListener("click", () => fileInput.click());
 dropzone.addEventListener("keydown", (e) => {
@@ -108,13 +151,6 @@ function renderTables(tables) {
     .join("");
 }
 
-function escapeHtml(text) {
-  return String(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
 function showPage(page) {
   if (!page) return;
   activePage = page;
@@ -150,23 +186,23 @@ function showPage(page) {
   });
 }
 
-function renderResult(result) {
+function renderExtraction(result) {
   lastResult = result;
   resultPanel.hidden = false;
   fileBadge.textContent = result.source_filename || "document.pdf";
   pagesBadge.textContent = `${result.pages_ok}/${result.pages_processed} pages OK (${result.pages_total} total)`;
   timeBadge.textContent = `${(result.processing_time_ms / 1000).toFixed(1)} s`;
-  modelBadge.textContent = result.model.split("/").pop() || result.model;
+  modelBadge.textContent = (result.model || "").split("/").pop() || result.model;
 
   if (result.warnings?.length) {
     warningsBox.hidden = false;
-    warningsBox.innerHTML = `<strong>Avertissements</strong><ul>${result.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`;
+    warningsBox.innerHTML = `<strong>Avertissements extraction</strong><ul>${result.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join("")}</ul>`;
   } else {
     warningsBox.hidden = true;
   }
 
   pageList.innerHTML = "";
-  result.pages.forEach((page) => {
+  (result.pages || []).forEach((page) => {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "page-tab";
@@ -180,9 +216,137 @@ function renderResult(result) {
     pageList.appendChild(btn);
   });
 
-  if (result.pages.length) {
-    showPage(result.pages[0]);
+  if (result.pages?.length) showPage(result.pages[0]);
+}
+
+function renderAnalysis(analysis) {
+  if (!analysis) {
+    analysisPanel.hidden = true;
+    return;
   }
+  analysisPanel.hidden = false;
+  const d = analysis.decision || {};
+  const score =
+    d.score != null
+      ? Number(d.score).toFixed(2)
+      : analysis.final_score != null
+        ? Number(analysis.final_score).toFixed(2)
+        : "—";
+
+  decisionCard.innerHTML = `
+    <div class="decision-score">${score} / 100</div>
+    <div class="decision-class">Classe ${escapeHtml(d.risk_class || "—")}</div>
+    <div class="decision-text">${escapeHtml(d.decision || "")} — ${escapeHtml(d.recommendation || "")}</div>
+    ${d.blocking_status ? `<div class="decision-text">Blocage : ${escapeHtml(d.blocking_status)}</div>` : ""}
+    <div class="decision-text">Mode ${escapeHtml(analysis.scoring_mode || "STRICT")}</div>
+  `;
+
+  axesGrid.innerHTML = "";
+  (analysis.axes || []).forEach((axe) => {
+    const card = document.createElement("div");
+    card.className = "axe-card";
+    card.innerHTML = `
+      <div class="axe-label">${escapeHtml(axe.label)}</div>
+      <div class="axe-score">${axe.raw_score != null ? Number(axe.raw_score).toFixed(2) : "—"}</div>
+      <div class="axe-weight">Poids ${axe.weight ?? "—"} · Contrib. ${
+        axe.weighted_contribution != null ? Number(axe.weighted_contribution).toFixed(2) : "—"
+      }</div>
+      <div class="axe-weight">${axe.calculable ? "Calculable" : "Non calculable"}</div>
+      ${(axe.blocking_reasons || [])
+        .slice(0, 2)
+        .map((r) => `<div class="axe-weight">${escapeHtml(r)}</div>`)
+        .join("")}
+    `;
+    axesGrid.appendChild(card);
+  });
+
+  ratiosGrid.innerHTML = "";
+  (analysis.ratios || []).forEach((ratio) => {
+    const card = document.createElement("div");
+    card.className = "ratio-card";
+    const status = ratio.status || "non_calculable";
+    card.innerHTML = `
+      <div class="ratio-label">${escapeHtml(ratio.label)}</div>
+      <span class="ratio-status ${status}">${escapeHtml(status)}</span>
+      <div class="ratio-value">${
+        ratio.value != null ? Number(ratio.value).toFixed(2) : "N/C"
+      } ${escapeHtml(ratio.unit || "")} · ${escapeHtml(ratio.threshold || "")}</div>
+      <div class="ratio-value">${escapeHtml(ratio.formula || "")}</div>
+      <div class="ratio-value">Points ${ratio.points ?? 0} / ${ratio.max_points ?? 0}</div>
+    `;
+    ratiosGrid.appendChild(card);
+  });
+
+  datasetGrid.innerHTML = "";
+  const dataset = analysis.dataset || {};
+  Object.entries(dataset).forEach(([key, field]) => {
+    if (!field || typeof field !== "object" || !("status" in field)) return;
+    const card = document.createElement("div");
+    card.className = "dataset-card";
+    card.innerHTML = `
+      <div class="field-label">${escapeHtml(field.label || key)}</div>
+      <div class="field-value">${formatAmount(field.value)}</div>
+      <span class="field-status status-${escapeHtml(field.status)}">${escapeHtml(field.status)}</span>
+    `;
+    datasetGrid.appendChild(card);
+  });
+
+  if (analysis.warnings?.length) {
+    analysisWarnings.hidden = false;
+    analysisWarnings.innerHTML = `<strong>Avertissements analyse</strong><ul>${analysis.warnings
+      .map((w) => `<li>${escapeHtml(w)}</li>`)
+      .join("")}</ul>`;
+  } else {
+    analysisWarnings.hidden = true;
+  }
+
+  analysisRawJson.textContent = JSON.stringify(analysis, null, 2);
+}
+
+function optionalNumber(id) {
+  const el = document.getElementById(id);
+  const raw = el?.value?.trim();
+  if (!raw) return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function buildBehavioralJson() {
+  const payload = {};
+  const map = {
+    bam_rating: "bamRating",
+    ca_domiciliation_pct: "caDomPct",
+    debit_position_days: "debitDays",
+    overdraft_usage_pct: "overdraftPct",
+    bank_flows_vs_declared_ca_gap_pct: "flowGapPct",
+    payment_incidents_24m: "incidents",
+    rejected_debits_24m: "rejections",
+    unpaid_bills_24m: "unpaid",
+    leasing_payment_delays_24m: "leasingDelays",
+  };
+  Object.entries(map).forEach(([key, id]) => {
+    const value = optionalNumber(id);
+    if (value !== undefined) payload[key] = value;
+  });
+  return Object.keys(payload).length ? JSON.stringify(payload) : null;
+}
+
+function buildSectorJson() {
+  const payload = {};
+  const name = document.getElementById("sectorName")?.value?.trim();
+  if (name) payload.sector_name = name;
+  const map = {
+    commercial_profitability_median: "medCommercial",
+    financial_autonomy_median: "medAutonomy",
+    debt_ratio_median: "medDebt",
+    repayment_capacity_median: "medRepay",
+    ca_growth_median: "medGrowth",
+  };
+  Object.entries(map).forEach(([key, id]) => {
+    const value = optionalNumber(id);
+    if (value !== undefined) payload[key] = value;
+  });
+  return Object.keys(payload).length ? JSON.stringify(payload) : null;
 }
 
 copyBtn.addEventListener("click", async () => {
@@ -202,7 +366,10 @@ extractBtn.addEventListener("click", async () => {
   if (!selectedFile) return;
   clearError();
   extractBtn.disabled = true;
-  extractBtn.textContent = "Extraction en cours…";
+  const mode = getMode();
+  extractBtn.textContent =
+    mode === "analyze" ? "Analyse en cours…" : "Extraction en cours…";
+  analysisPanel.hidden = true;
 
   const formData = new FormData();
   formData.append("file", selectedFile);
@@ -210,20 +377,35 @@ extractBtn.addEventListener("click", async () => {
   if (maxPages) formData.append("max_pages", maxPages);
   if (forceVisionInput.checked) formData.append("force_vision", "true");
 
+  let endpoint = "/api/v1/extraction/pdf/content";
+  if (mode === "analyze") {
+    endpoint = "/api/v1/extraction/pdf/analyze";
+    formData.append("scoring_mode", scoringModeSelect.value || "STRICT");
+    const behavioral = buildBehavioralJson();
+    const sector = buildSectorJson();
+    if (behavioral) formData.append("behavioral_data", behavioral);
+    if (sector) formData.append("sector_benchmark", sector);
+  }
+
   try {
-    const response = await fetch("/api/v1/extraction/pdf/content", {
-      method: "POST",
-      body: formData,
-    });
+    const response = await fetch(endpoint, { method: "POST", body: formData });
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.detail || "Extraction impossible");
+      throw new Error(payload.detail || "Traitement impossible");
     }
-    renderResult(payload);
+    if (mode === "analyze") {
+      renderExtraction(payload.extraction);
+      renderAnalysis(payload.analysis);
+    } else {
+      renderExtraction(payload);
+      analysisPanel.hidden = true;
+    }
   } catch (err) {
     showError(err.message || "Erreur réseau");
   } finally {
     extractBtn.disabled = false;
-    extractBtn.textContent = "Extraire le contenu";
+    updateButtonLabel();
   }
 });
+
+updateButtonLabel();
