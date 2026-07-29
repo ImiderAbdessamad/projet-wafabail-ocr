@@ -79,3 +79,17 @@ def crop_region(image_bytes: bytes, region: PageRegion) -> bytes:
         output = io.BytesIO()
         cropped.save(output, format="JPEG", quality=82)
         return output.getvalue()
+
+
+def rotate_image_bytes(
+    image_bytes: bytes,
+    angle: int,
+    *,
+    quality: int = 85,
+) -> bytes:
+    """Tourne une image JPEG et retourne les nouveaux octets."""
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        rotated = img.convert("RGB").rotate(-angle, expand=True)
+        output = io.BytesIO()
+        rotated.save(output, format="JPEG", quality=quality)
+        return output.getvalue()

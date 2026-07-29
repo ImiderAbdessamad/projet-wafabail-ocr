@@ -1,12 +1,12 @@
-"""Client bas niveau — appels vision à Ollama (image → JSON structuré).
+"""Client bas niveau — appels vision à Ollama (image → JSON ou Markdown).
 
-Logique partagée entre l'extraction CIN et l'extraction ICE (lorsqu'un
-document ICE est une image ou une page de PDF scanné) : on envoie une image
-en base64 au modèle GLM vision et on récupère un objet JSON structuré.
+Logique partagée entre l'extraction CIN / ICE (JSON) et l'extraction PDF
+page par page (Markdown fidèle au layout).
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -46,6 +46,30 @@ def extract_json_block(raw: str) -> dict[str, Any]:
         raise VisionExtractionError(
             "Le modèle a renvoyé une réponse invalide (JSON illisible)."
         ) from exc
+
+
+def _clean_markdown_response(raw: str) -> str:
+    """Supprime les fences Markdown ajoutées inutilement par le modèle."""
+    text = str(raw or "").strip()
+
+    prefixes = (
+        "```markdown",
+        "```md",
+        "```text",
+        "```",
+    )
+
+    lowered = text.lower()
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            text = text[len(prefix) :].lstrip()
+            break
+
+    if text.rstrip().endswith("```"):
+        text = text.rstrip()
+        text = text[:-3].rstrip()
+
+    return text.strip()
 
 
 async def vision_chat_json(
@@ -118,3 +142,155 @@ async def vision_chat_json(
         raise VisionExtractionError("Réponse vide du modèle.")
 
     return extract_json_block(raw_content), elapsed_ms
+
+
+async def vision_chat_text(
+    image_bytes: bytes,
+    system_prompt: str,
+    user_message: str = "Transcris cette page.",
+    model: str | None = None,
+    *,
+    timeout_seconds: float | None = None,
+    num_predict: int = 8192,
+    max_attempts: int = 3,
+) -> tuple[str, float]:
+    """Envoie une image à Ollama et retourne une transcription Markdown."""
+    if not image_bytes:
+        raise VisionExtractionError(
+            "Impossible d'appeler le modèle Vision avec une image vide."
+        )
+
+    if max_attempts < 1:
+        raise ValueError("max_attempts doit être supérieur ou égal à 1.")
+
+    b64_image = base64.b64encode(image_bytes).decode("ascii")
+    used_model = model or OLLAMA_MODEL
+
+    configured_timeout = (
+        timeout_seconds
+        or OLLAMA_TIMEOUT_SECONDS
+        or REQUEST_TIMEOUT_SECONDS
+        or 180.0
+    )
+
+    timeout = httpx.Timeout(
+        connect=30.0,
+        read=max(float(configured_timeout), 180.0),
+        write=60.0,
+        pool=30.0,
+    )
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        current_num_predict = min(
+            num_predict + ((attempt - 1) * 4096),
+            16384,
+        )
+
+        payload = {
+            "model": used_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt,
+                },
+                {
+                    "role": "user",
+                    "content": user_message,
+                    "images": [b64_image],
+                },
+            ],
+            "stream": False,
+            "keep_alive": "30m",
+            "options": {
+                "temperature": 0,
+                "num_predict": current_num_predict,
+                "num_ctx": 16384,
+            },
+        }
+
+        started = time.perf_counter()
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json=payload,
+                )
+
+            if response.status_code in {500, 502, 503, 504}:
+                raise VisionExtractionError(
+                    f"Ollama HTTP {response.status_code} : "
+                    f"{response.text[:250]}"
+                )
+
+            response.raise_for_status()
+
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise VisionExtractionError(
+                    "La réponse HTTP d'Ollama n'est pas un JSON valide."
+                ) from exc
+
+            message = body.get("message") or {}
+            raw_content = message.get("content") or body.get("response") or ""
+
+            logger.info(
+                (
+                    "Vision Markdown attempt=%d/%d "
+                    "done=%r done_reason=%r eval_count=%r"
+                ),
+                attempt,
+                max_attempts,
+                body.get("done"),
+                body.get("done_reason"),
+                body.get("eval_count"),
+            )
+
+            markdown = _clean_markdown_response(raw_content)
+
+            if not markdown:
+                raise VisionExtractionError("Réponse vide du modèle Vision.")
+
+            if len(markdown) < 20 and markdown.strip() != "[PAGE VIDE]":
+                raise VisionExtractionError(
+                    "Réponse trop courte du modèle Vision."
+                )
+
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            return markdown, elapsed_ms
+
+        except httpx.ConnectError:
+            last_error = VisionExtractionError(
+                f"Impossible de contacter Ollama sur {OLLAMA_URL}."
+            )
+        except httpx.TimeoutException:
+            last_error = VisionExtractionError(
+                f"Timeout Ollama après {float(configured_timeout):.0f} secondes."
+            )
+        except httpx.HTTPStatusError as exc:
+            last_error = VisionExtractionError(
+                f"Ollama HTTP {exc.response.status_code} : "
+                f"{exc.response.text[:250]}"
+            )
+        except httpx.TransportError as exc:
+            last_error = VisionExtractionError(f"Erreur réseau Ollama : {exc}")
+        except VisionExtractionError as exc:
+            last_error = exc
+
+        logger.warning(
+            "Extraction Vision Markdown échouée tentative %d/%d : %s",
+            attempt,
+            max_attempts,
+            last_error,
+        )
+
+        if attempt < max_attempts:
+            delay = min(2**attempt, 6)
+            await asyncio.sleep(delay)
+
+    raise VisionExtractionError(
+        f"Extraction Vision impossible après {max_attempts} tentative(s) : {last_error}"
+    )

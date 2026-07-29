@@ -250,22 +250,26 @@ def test_extract_and_score_with_complement():
 
 
 def test_pdf_content_extraction_native():
-    """PDF texte natif : extraction page par page sans appel vision."""
-    candidates = glob.glob(os.path.join(SAMPLES_DIR, "*BILAN*.pdf"))
-    if not candidates:
-        pytest.skip("Aucun PDF natif de test disponible.")
-    pdf_path = candidates[0]
-    with open(pdf_path, "rb") as fh:
-        r = client.post(
-            "/api/v1/extraction/pdf/content",
-            files={"file": (os.path.basename(pdf_path), fh, "application/pdf")},
-            data={"max_pages": "2"},
-        )
+    """PDF texte simple sans tableau : extraction native (layout conservé)."""
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 72), "Titre du document\nParagraphe ligne 1\nParagraphe ligne 2")
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    r = client.post(
+        "/api/v1/extraction/pdf/content",
+        files={"file": ("sample.pdf", pdf_bytes, "application/pdf")},
+        data={"max_pages": "1"},
+    )
     assert r.status_code == 200
     d = r.json()
-    assert d["pages_processed"] >= 1
-    assert d["pages_ok"] >= 1
+    assert d["pages_processed"] == 1
+    assert d["pages_ok"] == 1
     assert d["pages"][0]["extraction_mode"] == "native"
     assert d["pages"][0]["content"]
-    assert len(d["pages"][0]["content"]) > 20
-
+    assert "\n" in d["pages"][0]["content"]
+    assert d["pages"][0]["tables"] == []
+    assert any("Markdown" in w for w in d["warnings"])
