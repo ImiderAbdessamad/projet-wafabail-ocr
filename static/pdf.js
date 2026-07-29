@@ -93,10 +93,18 @@ function setFile(file) {
 }
 
 function updateButtonLabel() {
-  extractBtn.textContent =
-    getMode() === "analyze" ? "Extraire + Analyser" : "Extraire le contenu";
-  analyzeOptions.hidden = getMode() !== "analyze";
+  const analyze = getMode() === "analyze";
+  extractBtn.textContent = analyze ? "Extraire + Analyser" : "Extraire le contenu";
+  analyzeOptions.hidden = !analyze;
+  const modeHint = document.getElementById("modeHint");
+  if (modeHint) {
+    modeHint.textContent = analyze
+      ? "Mode analyse : après OCR, le panneau « Analyse financière » affiche score, axes, ratios et champs."
+      : "Mode extraction seule : aucun calcul / scoring ne s’affiche. Passez en « Extraction + Analyse » pour les ratios.";
+  }
 }
+
+updateButtonLabel();
 
 document.querySelectorAll('input[name="pdfMode"]').forEach((el) => {
   el.addEventListener("change", updateButtonLabel);
@@ -233,12 +241,19 @@ function renderAnalysis(analysis) {
         ? Number(analysis.final_score).toFixed(2)
         : "—";
 
+  const ratioCount = (analysis.ratios || []).length;
+  const ratioOk = (analysis.ratios || []).filter((r) => r.value != null).length;
+  const fieldOk = Object.values(analysis.dataset || {}).filter(
+    (f) => f && typeof f === "object" && f.value != null
+  ).length;
+
   decisionCard.innerHTML = `
     <div class="decision-score">${score} / 100</div>
     <div class="decision-class">Classe ${escapeHtml(d.risk_class || "—")}</div>
     <div class="decision-text">${escapeHtml(d.decision || "")} — ${escapeHtml(d.recommendation || "")}</div>
     ${d.blocking_status ? `<div class="decision-text">Blocage : ${escapeHtml(d.blocking_status)}</div>` : ""}
     <div class="decision-text">Mode ${escapeHtml(analysis.scoring_mode || "STRICT")}</div>
+    <div class="decision-text">Calculs affichés : ${ratioOk}/${ratioCount} ratios · ${fieldOk} champs dataset</div>
   `;
 
   axesGrid.innerHTML = "";
@@ -261,6 +276,9 @@ function renderAnalysis(analysis) {
   });
 
   ratiosGrid.innerHTML = "";
+  if (!ratioCount) {
+    ratiosGrid.innerHTML = `<p class="analyze-hint">Aucun ratio calculé (dataset vide ou OCR incomplet).</p>`;
+  }
   (analysis.ratios || []).forEach((ratio) => {
     const card = document.createElement("div");
     card.className = "ratio-card";
@@ -290,6 +308,9 @@ function renderAnalysis(analysis) {
     `;
     datasetGrid.appendChild(card);
   });
+  if (!datasetGrid.children.length) {
+    datasetGrid.innerHTML = `<p class="analyze-hint">Aucun champ financier extrait du Markdown.</p>`;
+  }
 
   if (analysis.warnings?.length) {
     analysisWarnings.hidden = false;
@@ -301,6 +322,7 @@ function renderAnalysis(analysis) {
   }
 
   analysisRawJson.textContent = JSON.stringify(analysis, null, 2);
+  analysisPanel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function optionalNumber(id) {
@@ -362,14 +384,37 @@ copyBtn.addEventListener("click", async () => {
   }
 });
 
+function formatApiDetail(detail) {
+  if (detail == null) return "Traitement impossible";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail.map((d) => d.msg || JSON.stringify(d)).join(" ; ");
+  }
+  try {
+    return JSON.stringify(detail);
+  } catch {
+    return String(detail);
+  }
+}
+
+const requestMeta = document.getElementById("requestMeta");
+
 extractBtn.addEventListener("click", async () => {
   if (!selectedFile) return;
   clearError();
   extractBtn.disabled = true;
   const mode = getMode();
-  extractBtn.textContent =
-    mode === "analyze" ? "Analyse en cours…" : "Extraction en cours…";
+  const wantAnalyze = mode === "analyze";
+  extractBtn.textContent = wantAnalyze
+    ? "Analyse en cours…"
+    : "Extraction en cours…";
   analysisPanel.hidden = true;
+  if (requestMeta) {
+    requestMeta.hidden = false;
+    requestMeta.textContent = wantAnalyze
+      ? "Appel API : /api/v1/extraction/pdf/analyze (extraction + calculs)…"
+      : "Appel API : /api/v1/extraction/pdf/content (Markdown seul)…";
+  }
 
   const formData = new FormData();
   formData.append("file", selectedFile);
@@ -377,10 +422,12 @@ extractBtn.addEventListener("click", async () => {
   if (maxPages) formData.append("max_pages", maxPages);
   if (forceVisionInput.checked) formData.append("force_vision", "true");
 
-  let endpoint = "/api/v1/extraction/pdf/content";
-  if (mode === "analyze") {
-    endpoint = "/api/v1/extraction/pdf/analyze";
-    formData.append("scoring_mode", scoringModeSelect.value || "STRICT");
+  const endpoint = wantAnalyze
+    ? "/api/v1/extraction/pdf/analyze"
+    : "/api/v1/extraction/pdf/content";
+
+  if (wantAnalyze) {
+    formData.append("scoring_mode", scoringModeSelect?.value || "STRICT");
     const behavioral = buildBehavioralJson();
     const sector = buildSectorJson();
     if (behavioral) formData.append("behavioral_data", behavioral);
@@ -389,19 +436,51 @@ extractBtn.addEventListener("click", async () => {
 
   try {
     const response = await fetch(endpoint, { method: "POST", body: formData });
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || "Traitement impossible");
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error(
+        `Réponse non-JSON (HTTP ${response.status}). Rechargez la page avec Ctrl+F5.`
+      );
     }
-    if (mode === "analyze") {
-      renderExtraction(payload.extraction);
-      renderAnalysis(payload.analysis);
+    if (!response.ok) {
+      throw new Error(formatApiDetail(payload.detail));
+    }
+
+    // Accepte la forme analyse même si le radio a été mal lu.
+    const extraction = payload.extraction || payload;
+    const analysis = payload.analysis || null;
+
+    if (wantAnalyze && !analysis) {
+      throw new Error(
+        "L'API n'a pas renvoyé le bloc « analysis ». " +
+          "Rechargez avec Ctrl+F5 (ancien pdf.js en cache) ou redémarrez uvicorn."
+      );
+    }
+
+    renderExtraction(extraction);
+    if (analysis) {
+      renderAnalysis(analysis);
+      if (requestMeta) {
+        const nOk = (analysis.ratios || []).filter((r) => r.value != null).length;
+        requestMeta.textContent =
+          `OK · ${endpoint} · ${nOk} ratio(s) calculé(s) · score ${
+            analysis.final_score != null ? Number(analysis.final_score).toFixed(2) : "—"
+          }`;
+      }
     } else {
-      renderExtraction(payload);
       analysisPanel.hidden = true;
+      if (requestMeta) {
+        requestMeta.textContent = `OK · ${endpoint} · Markdown seul (pas de scoring)`;
+      }
     }
   } catch (err) {
     showError(err.message || "Erreur réseau");
+    if (requestMeta) {
+      requestMeta.hidden = false;
+      requestMeta.textContent = `Échec · ${endpoint}`;
+    }
   } finally {
     extractBtn.disabled = false;
     updateButtonLabel();

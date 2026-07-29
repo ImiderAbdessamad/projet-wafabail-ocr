@@ -231,6 +231,15 @@
   line-height: 1.45;
 }
 
+.analysis-panel {
+  border: 1px solid rgba(55, 211, 201, 0.45);
+  box-shadow: 0 0 0 1px rgba(55, 211, 201, 0.12);
+}
+
+.analysis-panel .section-title {
+  color: var(--accent-2);
+}
+
 .analyze-options select {
   padding: 8px 10px;
   border-radius: var(--radius-sm);

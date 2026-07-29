@@ -4,8 +4,9 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Extraction PDF — GLM Vision</title>
-  <link rel="stylesheet" href="/liasse.css" />
-  <link rel="stylesheet" href="/pdf.css" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <link rel="stylesheet" href="/liasse.css?v=20260730a" />
+  <link rel="stylesheet" href="/pdf.css?v=20260730a" />
 </head>
 <body>
   <div class="page">
@@ -64,16 +65,19 @@
 
         <div class="mode-toggle">
           <label class="mode-option">
-            <input type="radio" name="pdfMode" value="extract" checked />
-            <span>Extraction Markdown</span>
+            <input type="radio" name="pdfMode" value="extract" />
+            <span>Extraction Markdown seule</span>
           </label>
           <label class="mode-option">
-            <input type="radio" name="pdfMode" value="analyze" />
-            <span>Extraction + Analyse / Scoring</span>
+            <input type="radio" name="pdfMode" value="analyze" checked />
+            <span>Extraction + Analyse / Scoring (ratios &amp; décision)</span>
           </label>
         </div>
+        <p class="analyze-hint" id="modeHint">
+          Mode analyse : après OCR, le panneau « Analyse financière » affiche score, axes, ratios et champs.
+        </p>
 
-        <details id="analyzeOptions" class="analyze-options" hidden>
+        <details id="analyzeOptions" class="analyze-options">
           <summary>Compléments scoring (comportemental &amp; secteur)</summary>
           <p class="analyze-hint">
             Optionnel. Sans ces données, l’axe comportemental / sectoriel reste
@@ -110,8 +114,10 @@
         <p id="errorBox" class="error-box" hidden></p>
       </section>
 
-      <section id="analysisPanel" class="card result-card" hidden>
-        <h2 class="section-title">Analyse financière</h2>
+      <p id="requestMeta" class="analyze-hint" hidden></p>
+
+      <section id="analysisPanel" class="card result-card analysis-panel" hidden>
+        <h2 class="section-title">Analyse financière (ratios &amp; scoring)</h2>
         <div id="decisionCard" class="decision-card"></div>
         <div id="axesGrid" class="axes-grid"></div>
         <div id="analysisWarnings" class="warnings-box" hidden></div>
@@ -159,6 +165,6 @@
       </section>
     </main>
   </div>
-  <script src="/pdf.js"></script>
+  <script src="/pdf.js?v=20260730a"></script>
 </body>
 </html>
