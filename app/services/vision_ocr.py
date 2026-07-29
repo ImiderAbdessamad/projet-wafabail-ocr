@@ -419,6 +419,13 @@ def _assemble_from_page_results(
             continue
         if not result:
             continue
+        obs = observations_from_page_payload(idx + 1, result)
+        if not obs:
+            page_errors.append(
+                f"Page {idx + 1} : OCR sans lignes extraites "
+                f"(type={result.get('page_type') or 'AUTRE'})."
+            )
+            continue
         pages_used += 1
         payloads.append(result)
         page_type = (result.get("page_type") or "AUTRE").upper()
@@ -428,7 +435,6 @@ def _assemble_from_page_results(
                 sections_found.add(page_type)
         elif page_type == "ESG":
             sections_found.add("CPC")  # CAF souvent dans ESG
-        obs = observations_from_page_payload(idx + 1, result)
         all_observations.extend(obs)
 
     if not all_observations:

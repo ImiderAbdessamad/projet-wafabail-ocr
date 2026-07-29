@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Extraction PDF — GLM Vision</title>
+  <link rel="stylesheet" href="/liasse.css" />
+  <link rel="stylesheet" href="/pdf.css" />
+</head>
+<body>
+  <div class="page">
+    <nav class="tool-switch">
+      <a href="/" class="tool-switch-link">Extraction CIN</a>
+      <a href="/ice" class="tool-switch-link">Extraction ICE</a>
+      <a href="/liasse" class="tool-switch-link">Liasse &amp; Scoring</a>
+      <a href="/pdf" class="tool-switch-link active">PDF page par page</a>
+    </nav>
+
+    <header class="header">
+      <div class="header-badge">
+        <span class="dot"></span>
+        Ollama · GLM Vision · OCR
+      </div>
+      <h1>Extraction PDF page par page</h1>
+      <p class="subtitle">
+        Déposez un PDF : chaque page est analysée par GLM Vision (ou texte natif si disponible).
+        Le contenu extrait s'affiche page par page pour relecture ou réutilisation.
+      </p>
+    </header>
+
+    <main class="layout pdf-layout">
+      <section class="card upload-card">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choisir un PDF">
+          <input type="file" id="fileInput" accept="application/pdf" hidden />
+
+          <div id="dropzoneEmpty" class="dropzone-empty">
+            <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M4 16.5V18a2 2 0 002 2h12a2 2 0 002-2v-1.5M7 9l5-5 5 5M12 4v12" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p class="dropzone-title">Glissez un PDF ici</p>
+            <p class="dropzone-hint">Texte natif ou scan — max 50 Mo</p>
+          </div>
+
+          <div id="previewFile" class="preview-file" hidden>
+            <svg class="preview-file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
+              <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 3v5h5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="previewFileName" class="preview-file-name"></span>
+            <span id="previewFileSize" class="preview-file-size"></span>
+          </div>
+        </div>
+
+        <div class="pdf-options">
+          <label class="pdf-option">
+            Pages max
+            <input type="number" id="maxPages" min="1" max="70" placeholder="Toutes" />
+          </label>
+          <label class="pdf-option checkbox">
+            <input type="checkbox" id="forceVision" />
+            Forcer GLM Vision (ignorer texte natif)
+          </label>
+        </div>
+
+        <button type="button" id="extractBtn" class="btn-primary" disabled>Extraire le contenu</button>
+        <p id="errorBox" class="error-box" hidden></p>
+      </section>
+
+      <section id="resultPanel" class="card result-card" hidden>
+        <div class="pdf-summary">
+          <div class="pdf-badges">
+            <span id="fileBadge" class="badge"></span>
+            <span id="pagesBadge" class="badge"></span>
+            <span id="timeBadge" class="badge"></span>
+            <span id="modelBadge" class="badge"></span>
+          </div>
+          <div id="warningsBox" class="warnings-box" hidden></div>
+        </div>
+
+        <div class="pdf-viewer">
+          <aside class="pdf-page-list" id="pageList" aria-label="Pages du document"></aside>
+          <article class="pdf-page-detail" id="pageDetail">
+            <div class="pdf-page-header">
+              <h2 id="pageTitle">Sélectionnez une page</h2>
+              <div class="pdf-page-meta">
+                <span id="pageModeBadge" class="badge"></span>
+                <span id="pageStatusBadge" class="badge"></span>
+                <button type="button" id="copyBtn" class="btn-secondary" hidden>Copier le texte</button>
+              </div>
+            </div>
+            <pre id="pageContent" class="pdf-content"></pre>
+            <div id="pageTables" class="pdf-tables" hidden></div>
+            <p id="pageError" class="error-box" hidden></p>
+            <details id="rawJsonBlock" class="pdf-raw" hidden>
+              <summary>Réponse brute GLM (JSON)</summary>
+              <pre id="pageRawJson"></pre>
+            </details>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/pdf.js"></script>
+</body>
+</html>

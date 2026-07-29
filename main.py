@@ -100,6 +100,11 @@ async def ice_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "ice.html")
 
 
+@app.get("/pdf", tags=["Système"], include_in_schema=False)
+async def pdf_extract_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "pdf.html")
+
+
 @app.get("/liasse", tags=["Système"], include_in_schema=False)
 async def liasse_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "liasse.html")

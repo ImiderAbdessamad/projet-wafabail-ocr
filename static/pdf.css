@@ -1,0 +1,207 @@
+.pdf-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.pdf-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.pdf-option {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.pdf-option input[type="number"] {
+  width: 100px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--card-border);
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--text-primary);
+}
+
+.pdf-option.checkbox {
+  flex-direction: row;
+  align-items: center;
+  margin-top: 22px;
+  gap: 8px;
+}
+
+.pdf-viewer {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 16px;
+  min-height: 420px;
+  margin-top: 16px;
+}
+
+@media (max-width: 768px) {
+  .pdf-viewer {
+    grid-template-columns: 1fr;
+  }
+}
+
+.pdf-page-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 520px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.page-tab {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.page-tab:hover {
+  border-color: var(--card-border);
+  color: var(--text-primary);
+}
+
+.page-tab.active {
+  border-color: var(--accent);
+  background: rgba(124, 108, 255, 0.15);
+  color: var(--text-primary);
+}
+
+.page-tab-status {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.page-tab-status.ok { background: var(--success-bg); color: var(--success); }
+.page-tab-status.error { background: var(--danger-bg); color: var(--danger); }
+.page-tab-status.native { background: rgba(55, 211, 201, 0.15); color: var(--accent-2); }
+
+.pdf-page-detail {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.15);
+  min-height: 360px;
+}
+
+.pdf-page-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.pdf-page-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.pdf-page-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pdf-content {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(0, 0, 0, 0.25);
+  max-height: 360px;
+  overflow: auto;
+}
+
+.pdf-tables {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pdf-table-card {
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  overflow-x: auto;
+}
+
+.pdf-table-card h3 {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+}
+
+.pdf-table-card table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.pdf-table-card th,
+.pdf-table-card td {
+  border: 1px solid var(--card-border);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.pdf-raw {
+  margin-top: 16px;
+  font-size: 12px;
+}
+
+.pdf-raw pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow: auto;
+  font-size: 11px;
+}
+
+.btn-secondary {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--card-border);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-primary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+
+.pdf-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pdf-summary .warnings-box {
+  margin-top: 12px;
+}

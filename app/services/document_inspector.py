@@ -19,6 +19,25 @@ FORECAST_MARKERS = (
 INTERIM_MARKERS = ("situation provisoire", "situation intermédiaire", "situation intermediaire")
 REPORT_MARKERS = ("rapport des éléments financiers", "elements financiers calcules")
 
+# Seuil bas (aperçu 15 %) : une page réellement blanche a très peu de pixels non blancs.
+_VISUAL_SAMPLE_MATRIX = fitz.Matrix(0.15, 0.15)
+_MIN_NONWHITE_PIXELS = 150
+
+
+def _page_has_visual_content(page: fitz.Page) -> bool:
+    """Détecte du contenu visuel (scan/image) même sans couche texte PDF."""
+    if page.get_images():
+        return True
+    pix = page.get_pixmap(matrix=_VISUAL_SAMPLE_MATRIX, alpha=False)
+    nonwhite = 0
+    samples = pix.samples
+    for i in range(0, len(samples), 3):
+        if samples[i] < 250 or samples[i + 1] < 250 or samples[i + 2] < 250:
+            nonwhite += 1
+            if nonwhite >= _MIN_NONWHITE_PIXELS:
+                return True
+    return False
+
 
 def inspect_document(content: bytes) -> DocumentInspection:
     """Inspecte un PDF page par page avant l'extraction."""
@@ -44,11 +63,21 @@ def inspect_document(content: bytes) -> DocumentInspection:
                 rotation = int(page.rotation or 0) % 360
                 if rotation:
                     rotated_pages[idx] = rotation
-                is_blank = text_length < 10
+                has_visual = _page_has_visual_content(page)
+                # Absence de texte natif ≠ page blanche (liasses scannées).
+                is_blank = text_length < 10 and not has_visual
                 if is_blank:
                     blank_pages.append(idx)
 
-                page_type = classify_page_text(cleaned)
+                page_type = classify_page_text(cleaned, has_visual=has_visual)
+                page_warnings: list[str] = []
+                if is_blank:
+                    page_warnings.append("Page quasi vide.")
+                elif text_length < 10 and has_visual:
+                    page_warnings.append(
+                        "Page scannée (pas de texte natif) — OCR vision requis."
+                    )
+
                 page_inspections.append(
                     PageInspection(
                         page_number=idx,
@@ -59,7 +88,7 @@ def inspect_document(content: bytes) -> DocumentInspection:
                         height=float(page.rect.height),
                         is_blank=is_blank,
                         page_type=page_type,
-                        warnings=["Page quasi vide."] if is_blank else [],
+                        warnings=page_warnings,
                     )
                 )
         finally:
@@ -108,10 +137,10 @@ def inspect_document(content: bytes) -> DocumentInspection:
     )
 
 
-def classify_page_text(text: str) -> str:
+def classify_page_text(text: str, *, has_visual: bool = False) -> str:
     lowered = (text or "").lower()
     if not lowered.strip():
-        return "BLANCHE"
+        return "SCAN" if has_visual else "BLANCHE"
     if "identification du contribuable" in lowered or "raison sociale" in lowered:
         return "IDENTIFICATION"
     if "bilan (actif)" in lowered:

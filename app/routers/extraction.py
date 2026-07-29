@@ -4,6 +4,7 @@
   (méthode principale pour liasses scannées multi-pages).
 - POST /extraction/liasse/zip/list : liste les PDF d'une archive ZIP.
 - POST /extraction/liasse/score : pipeline complet extraction + scoring 3 axes.
+- POST /extraction/pdf/content : PDF → contenu extrait page par page (GLM Vision).
 """
 import json
 from typing import Optional
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 from app.config import MAX_UPLOAD_BYTES, SCORING_MIN_COMPLETENESS_PCT
 from app.routers.scoring import evaluate_scoring
 from app.schemas.liasse import LiasseExtractionResult
+from app.schemas.pdf_extraction import PdfContentExtractionResult
 from app.schemas.scoring import (
     BehavioralMetricsInput,
     DecisionOutput,
@@ -32,7 +34,9 @@ from app.services.liasse_extraction import (
     extract_liasse_document,
     get_liasse_extraction_service,
 )
+from app.services.pdf_page_extractor import extract_pdf_content_by_page
 from app.services.scoring_eligibility import evaluate_extraction_eligibility
+from app.services.vision_client import VisionExtractionError
 
 router = APIRouter(prefix="/extraction", tags=["Extraction"])
 
@@ -324,3 +328,38 @@ async def extract_and_score(
         )
 
     return ExtractAndScoreResponse(extraction=extraction, scoring=scoring)
+
+
+@router.post("/pdf/content", response_model=PdfContentExtractionResult)
+async def extract_pdf_content(
+    file: UploadFile = File(..., description="PDF à analyser page par page"),
+    max_pages: Optional[int] = Form(
+        None,
+        description="Nombre max de pages à traiter (défaut : OCR_MAX_PAGES)",
+    ),
+    force_vision: bool = Form(
+        False,
+        description="Forcer GLM Vision même si le PDF contient du texte natif",
+    ),
+) -> PdfContentExtractionResult:
+    """Extrait le contenu brut d'un PDF page par page via GLM Vision (ou texte natif).
+
+    Retourne pour chaque page : titre, texte transcrit, tableaux détectés et métadonnées.
+    Utile pour prévisualiser l'OCR avant un pipeline métier (liasse, scoring…).
+    """
+    content, filename = await _read_upload(file, None)
+    if max_pages is not None and max_pages < 1:
+        raise HTTPException(status_code=422, detail="max_pages doit être >= 1.")
+    try:
+        return await extract_pdf_content_by_page(
+            content,
+            filename,
+            max_pages=max_pages,
+            force_vision=force_vision,
+        )
+    except VisionExtractionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422, detail=f"Extraction PDF impossible : {exc}"
+        ) from exc

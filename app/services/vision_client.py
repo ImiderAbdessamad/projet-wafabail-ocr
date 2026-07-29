@@ -16,7 +16,12 @@ from typing import Any
 
 import httpx
 
-from app.config import OLLAMA_MODEL, OLLAMA_URL, REQUEST_TIMEOUT_SECONDS
+from app.config import (
+    OLLAMA_MODEL,
+    OLLAMA_TIMEOUT_SECONDS,
+    OLLAMA_URL,
+    REQUEST_TIMEOUT_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,9 @@ async def vision_chat_json(
     system_prompt: str,
     user_message: str = "Analyse cette image.",
     model: str | None = None,
+    *,
+    timeout_seconds: float | None = None,
+    num_predict: int | None = None,
 ) -> tuple[dict[str, Any], float]:
     """Envoie une image à Ollama (modèle GLM vision) et retourne le JSON structuré.
 
@@ -64,13 +72,21 @@ async def vision_chat_json(
         ],
         "format": "json",
         "stream": False,
+        "keep_alive": "30m",
         "options": {"temperature": 0},
     }
+    if num_predict is not None:
+        payload["options"]["num_predict"] = num_predict
 
+    timeout = timeout_seconds or OLLAMA_TIMEOUT_SECONDS or REQUEST_TIMEOUT_SECONDS
     started = time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+            if response.status_code in {500, 502, 503, 504}:
+                raise VisionExtractionError(
+                    f"Ollama HTTP {response.status_code} : {response.text[:180]}"
+                )
             response.raise_for_status()
     except httpx.ConnectError as exc:
         raise VisionExtractionError(

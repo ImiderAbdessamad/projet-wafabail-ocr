@@ -247,3 +247,25 @@ def test_extract_and_score_with_complement():
     # L'override fonds_propres doit débloquer la rentabilité financière
     # (RN extrait du CPC + FP fourni par l'analyste)
     assert d["scoring"]["ratios"]["rentabilite_financiere"]["value"] is not None
+
+
+def test_pdf_content_extraction_native():
+    """PDF texte natif : extraction page par page sans appel vision."""
+    candidates = glob.glob(os.path.join(SAMPLES_DIR, "*BILAN*.pdf"))
+    if not candidates:
+        pytest.skip("Aucun PDF natif de test disponible.")
+    pdf_path = candidates[0]
+    with open(pdf_path, "rb") as fh:
+        r = client.post(
+            "/api/v1/extraction/pdf/content",
+            files={"file": (os.path.basename(pdf_path), fh, "application/pdf")},
+            data={"max_pages": "2"},
+        )
+    assert r.status_code == 200
+    d = r.json()
+    assert d["pages_processed"] >= 1
+    assert d["pages_ok"] >= 1
+    assert d["pages"][0]["extraction_mode"] == "native"
+    assert d["pages"][0]["content"]
+    assert len(d["pages"][0]["content"]) > 20
+
