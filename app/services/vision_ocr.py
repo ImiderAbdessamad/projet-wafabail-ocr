@@ -20,7 +20,6 @@ from PIL import Image
 
 from app.config import (
     MAX_IMAGE_DIMENSION,
-    OCR_FAILED_PASS_DELAY_SECONDS,
     OCR_MAX_CONCURRENCY,
     OCR_MAX_PAGES,
     OCR_PAGE_DELAY_SECONDS,
@@ -41,7 +40,11 @@ from app.services.field_resolver import (
     observations_from_page_payload,
     resolve_all_fields,
 )
-from app.services.page_preprocessor import crop_region, preprocess_page_image
+from app.services.page_preprocessor import (
+    crop_content_regions,
+    preprocess_page_image,
+    rotate_image_bytes,
+)
 from app.services.result_builder import build_extraction_result
 
 logger = logging.getLogger(__name__)
@@ -387,6 +390,7 @@ def _merge_region_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
         "columns": [],
         "rows": [],
         "metadata": {},
+        "_extraction_strategy": "regions",
     }
     seen_rows: set[tuple[str, str]] = set()
     for payload in payloads:
@@ -397,12 +401,152 @@ def _merge_region_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
                 merged["columns"].append(col)
         merged["metadata"].update(payload.get("metadata") or {})
         for row in payload.get("rows", []) or []:
-            row_key = (row.get("label") or "", json.dumps(row.get("values") or {}, sort_keys=True))
+            row_key = (
+                row.get("label") or "",
+                json.dumps(row.get("values") or {}, sort_keys=True),
+            )
             if row_key in seen_rows:
                 continue
             seen_rows.add(row_key)
             merged["rows"].append(row)
     return merged
+
+
+def _vision_payload_is_insufficient(payload: dict[str, Any] | None) -> bool:
+    """Détecte une sortie Vision JSON trop pauvre pour le scoring."""
+    if not payload:
+        return True
+
+    page_type = (payload.get("page_type") or "AUTRE").upper()
+    rows = payload.get("rows") or []
+    useful_rows = [row for row in rows if (row.get("label") or "").strip()]
+    metadata = payload.get("metadata") or {}
+
+    if page_type == "IDENTIFICATION":
+        return not any(
+            metadata.get(key)
+            for key in (
+                "entreprise",
+                "identification_fiscale",
+                "reference",
+                "exercice",
+            )
+        )
+
+    if page_type in {"BILAN_ACTIF", "BILAN_PASSIF", "CPC", "ESG"}:
+        return len(useful_rows) < 3
+
+    if page_type == "AUTRE":
+        return len(useful_rows) < 2 and not payload.get("elements")
+
+    return len(useful_rows) < 2
+
+
+async def _extract_page_regions_json(
+    image_bytes: bytes,
+    page_num: int,
+    total_pages: int,
+) -> dict[str, Any]:
+    """Extrait une page par zones haute/basse puis fusionne le JSON."""
+    region_images = crop_content_regions(image_bytes)
+    payloads: list[dict[str, Any]] = []
+
+    for region_id, region_image in region_images:
+        payload = await _vision_call(
+            region_image,
+            page_num,
+            total_pages,
+            max_attempts=max(2, min(OCR_RETRY_ATTEMPTS, 3)),
+        )
+        payload = dict(payload)
+        payload["region_id"] = region_id
+        payloads.append(payload)
+
+    if not payloads:
+        raise VisionOcrError(f"Aucune région extraite page {page_num}.")
+
+    return _merge_region_payloads(payloads)
+
+
+async def _extract_single_page_with_fallbacks(
+    image_bytes: bytes,
+    page_num: int,
+    total_pages: int,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Même stratégie que /pdf/content : pleine page → régions → rotation 90°."""
+
+    async def _try_regions() -> dict[str, Any]:
+        result = await _extract_page_regions_json(image_bytes, page_num, total_pages)
+        result["_extraction_strategy"] = "regions"
+        return result
+
+    async def _try_rotation() -> dict[str, Any]:
+        rotated = rotate_image_bytes(image_bytes, 90)
+        result = await _vision_call(
+            rotated,
+            page_num,
+            total_pages,
+            max_attempts=max(2, min(OCR_RETRY_ATTEMPTS, 3)),
+        )
+        result = dict(result)
+        result["_extraction_strategy"] = "rotation_90"
+        result["orientation"] = 90
+        return result
+
+    try:
+        result = await _vision_call(
+            image_bytes,
+            page_num,
+            total_pages,
+            max_attempts=max(2, min(OCR_RETRY_ATTEMPTS, 3)),
+        )
+        if not _vision_payload_is_insufficient(result):
+            result = dict(result)
+            result["_extraction_strategy"] = "full_page"
+            return result, None
+
+        logger.info(
+            "Sortie pleine page insuffisante page %d, fallback régional.",
+            page_num,
+        )
+        try:
+            return await _try_regions(), None
+        except VisionOcrError as regional_exc:
+            logger.warning(
+                "Fallback régional page %d échoué après sortie insuffisante : %s",
+                page_num,
+                regional_exc,
+            )
+            try:
+                return await _try_rotation(), None
+            except VisionOcrError as rotated_exc:
+                return None, (
+                    "Extraction pleine page insuffisante, régionale et rotation 90° "
+                    f"échouées : {rotated_exc}"
+                )
+
+    except VisionOcrError as full_page_exc:
+        logger.warning("Vision pleine page %d échouée : %s", page_num, full_page_exc)
+        try:
+            return await _try_regions(), None
+        except VisionOcrError as regional_exc:
+            logger.warning(
+                "Fallback régional page %d échoué : %s",
+                page_num,
+                regional_exc,
+            )
+            try:
+                return await _try_rotation(), None
+            except VisionOcrError as rotated_exc:
+                logger.warning(
+                    "Vision page %d échouée après tous les fallbacks : %s",
+                    page_num,
+                    rotated_exc,
+                )
+                return None, (
+                    "Extraction pleine page, régionale et rotation 90° "
+                    f"échouées : {rotated_exc}"
+                )
 
 
 def _assemble_from_page_results(
@@ -494,72 +638,25 @@ async def _process_all_pages(
     page_images: list[bytes],
     total_to_analyze: int,
 ) -> list[tuple[int, dict[str, Any] | None, str | None]]:
-    """Passe 1 : toutes les pages séquentiellement."""
+    """Traite chaque page avec fallbacks : pleine page → régions → rotation 90°."""
     results: list[tuple[int, dict[str, Any] | None, str | None]] = []
     semaphore = asyncio.Semaphore(max(1, OCR_MAX_CONCURRENCY))
 
     for idx, page_bytes in enumerate(page_images):
         async with semaphore:
-            try:
-                result = await _vision_call(page_bytes, idx + 1, total_to_analyze)
-                results.append((idx, result, None))
-            except VisionOcrError as exc:
-                logger.warning("OCR page %d échouée : %s", idx + 1, exc)
-                results.append((idx, None, str(exc)))
+            result, error = await _extract_single_page_with_fallbacks(
+                page_bytes,
+                idx + 1,
+                total_to_analyze,
+            )
+            if error:
+                logger.warning("OCR page %d échouée : %s", idx + 1, error)
+            results.append((idx, result, error))
 
             if idx < len(page_images) - 1:
                 await asyncio.sleep(OCR_PAGE_DELAY_SECONDS)
 
     return results
-
-
-async def _retry_failed_pages(
-    page_images: list[bytes],
-    page_results: list[tuple[int, dict[str, Any] | None, str | None]],
-    total_to_analyze: int,
-) -> list[tuple[int, dict[str, Any] | None, str | None]]:
-    """Passe 2 : re-tente les pages en échec avec image réduite et longue pause."""
-    failed_indices = [idx for idx, _, err in page_results if err is not None]
-    if not failed_indices:
-        return page_results
-
-    logger.info(
-        "2e passe OCR : %d page(s) en échec, pause %.0fs…",
-        len(failed_indices), OCR_FAILED_PASS_DELAY_SECONDS,
-    )
-    await asyncio.sleep(OCR_FAILED_PASS_DELAY_SECONDS)
-
-    updated = list(page_results)
-    for idx in failed_indices:
-        small_img = _downscale_jpeg(page_images[idx], 800, quality=70)
-        try:
-            result = await _vision_call(
-                small_img, idx + 1, total_to_analyze, max_attempts=OCR_RETRY_ATTEMPTS + 2
-            )
-            updated[idx] = (idx, result, None)
-            logger.info("Page %d récupérée en 2e passe.", idx + 1)
-        except VisionOcrError as exc:
-            try:
-                preprocessed = preprocess_page_image(small_img)
-                region_payloads: list[dict[str, Any]] = []
-                for region in preprocessed.regions[1:]:
-                    region_img = crop_region(preprocessed.image_bytes, region)
-                    region_payloads.append(
-                        await _vision_call(
-                            region_img,
-                            idx + 1,
-                            total_to_analyze,
-                            max_attempts=max(2, OCR_RETRY_ATTEMPTS),
-                        )
-                    )
-                updated[idx] = (idx, _merge_region_payloads(region_payloads), None)
-                logger.info("Page %d récupérée par fallback régional.", idx + 1)
-            except VisionOcrError as region_exc:
-                logger.warning("Page %d toujours en échec après 2e passe : %s", idx + 1, region_exc)
-                updated[idx] = (idx, None, str(region_exc))
-        await asyncio.sleep(OCR_PAGE_DELAY_SECONDS)
-
-    return updated
 
 
 async def extract_liasse_via_vision(
@@ -568,8 +665,9 @@ async def extract_liasse_via_vision(
     """Extraction OCR vision avec pipeline observation → résolution → validation.
 
     Utilisé par l'API `/api/v1/extraction/liasse` et `/liasse/score` via
-    `extract_liasse_document()` — le modèle GLM Flash est appelé sur le
-    serveur Ollama distant configuré dans `.env` (pas local).
+    `extract_liasse_document()` — même stratégie de robustesse que `/pdf/content`
+    (pleine page → régions → rotation 90°), mais sortie JSON structurée pour
+    le scoring (pas Markdown).
     """
     async with _OCR_JOB_LOCK:
         t0 = time.perf_counter()
@@ -580,16 +678,27 @@ async def extract_liasse_via_vision(
         total_to_analyze = len(page_images)
 
         page_results = await _process_all_pages(page_images, total_to_analyze)
-        page_results = await _retry_failed_pages(page_images, page_results, total_to_analyze)
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         result = _assemble_from_page_results(
             page_results, pages_total, elapsed_ms, filename
         )
+        strategies = sorted(
+            {
+                (payload or {}).get("_extraction_strategy", "unknown")
+                for _, payload, err in page_results
+                if payload and not err
+            }
+        )
         result.warnings = [
             (
                 f"OCR Vision distant : model={OLLAMA_VISION_MODEL} "
-                f"url={OLLAMA_URL} warmup={warmup_status.get('warmup')}"
+                f"url={OLLAMA_URL} warmup={warmup_status.get('warmup')} "
+                f"strategies={strategies or ['none']}"
+            ),
+            (
+                "Stratégie scoring alignée sur /pdf/content : "
+                "pleine page → régions top/bottom → rotation 90°."
             ),
             *list(result.warnings or []),
         ]

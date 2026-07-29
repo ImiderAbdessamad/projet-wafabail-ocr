@@ -45,7 +45,7 @@ OCR_RETRY_DELAY_SECONDS = float(os.getenv("OCR_RETRY_DELAY", "15"))
 OCR_PAGE_DELAY_SECONDS = float(os.getenv("OCR_PAGE_DELAY", "4"))
 OCR_FAILED_PASS_DELAY_SECONDS = float(os.getenv("OCR_FAILED_PASS_DELAY", "20"))
 # Limite tokens de sortie Vision (évite timeouts gateway sur serveur distant)
-OCR_VISION_NUM_PREDICT = int(os.getenv("OCR_VISION_NUM_PREDICT", "1800"))
+OCR_VISION_NUM_PREDICT = int(os.getenv("OCR_VISION_NUM_PREDICT", "8192"))
 # Warmup : si false, un 504 au préchauffage n'empêche pas l'extraction
 OCR_SOFT_WARMUP = os.getenv("OCR_SOFT_WARMUP", "true").lower() in {"1", "true", "yes"}
 NATIVE_COMPLETENESS_THRESHOLD = float(os.getenv("NATIVE_COMPLETENESS_THRESHOLD", "15"))
