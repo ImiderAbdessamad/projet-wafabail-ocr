@@ -135,6 +135,68 @@ def validate_candidate_scope(candidate: FinancialCandidate) -> list[str]:
     return reasons
 
 
+def infer_period_from_column(
+    candidate: FinancialCandidate,
+) -> FinancialCandidate:
+    """Normalise period à partir de column_name — sans créer de montant."""
+    column = _fold(candidate.evidence.column_name or "")
+    section = candidate.evidence.section
+
+    n1_tokens = (
+        "exercice precedent",
+        "precedent",
+        "n-1",
+        "n minus 1",
+        "colonne 4",
+    )
+
+    if any(token in column for token in n1_tokens):
+        inferred = "N_MINUS_1"
+    elif section == "BILAN_ACTIF" and "net" in column:
+        inferred = "N"
+    elif (
+        section == "BILAN_PASSIF"
+        and "exercice" in column
+        and "precedent" not in column
+    ):
+        inferred = "N"
+    elif (
+        section in {"CPC", "DETAIL_CPC"}
+        and any(
+            token in column
+            for token in (
+                "3 1 2",
+                "3 = 1 + 2",
+                "3=1+2",
+                "total exercice",
+                "totaux de l exercice",
+                "totaux de lexercice",
+                "exercice",
+            )
+        )
+        and "precedent" not in column
+    ):
+        inferred = "N"
+    else:
+        return candidate
+
+    if candidate.period == inferred:
+        return candidate
+
+    return candidate.model_copy(
+        update={
+            "period": inferred,
+            "warnings": [
+                *candidate.warnings,
+                (
+                    "Période normalisée par Python "
+                    f"à partir de la colonne : {inferred}."
+                ),
+            ],
+        }
+    )
+
+
 def canonicalize_candidate_period(candidate: FinancialCandidate) -> FinancialCandidate:
     if candidate.period != "N_MINUS_1":
         return candidate
@@ -142,6 +204,18 @@ def canonicalize_candidate_period(candidate: FinancialCandidate) -> FinancialCan
     if mapped_code is None:
         return candidate
     return candidate.model_copy(update={"field_code": mapped_code})
+
+
+def _is_total_general_label(label: str) -> bool:
+    normalized = _fold(label)
+    allowed = (
+        "total i ii iii",
+        "total i+ii+iii",
+        "total general",
+        "total passif",
+        "total actif",
+    )
+    return any(token in normalized for token in allowed)
 
 
 def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str]]:
@@ -172,9 +246,18 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
             reasons.append("La colonne Exercice précédent est interdite.")
 
     if section == "CPC" and candidate.period == "N" and field_code in _CPC_CURRENT_FIELDS:
-        valid_total_column = any(token in column for token in ("total", "totaux", "3 = 1 + 2", "3=1+2"))
+        valid_total_column = any(
+            token in column
+            for token in ("total", "totaux", "3 1 2", "3=1+2", "3 = 1 + 2")
+        )
         if not valid_total_column and column != "exercice":
             reasons.append("Le CPC courant exige la colonne Totaux de l'exercice.")
+
+    if field_code in {"TOTAL_PASSIF", "TOTAL_ACTIF"}:
+        if not _is_total_general_label(label):
+            reasons.append(
+                "Un total intermédiaire ne peut pas devenir le total général."
+            )
 
     if field_code == "STOCKS":
         if section != "BILAN_ACTIF":
@@ -216,8 +299,11 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
         if "autres charges financieres" in label:
             reasons.append("Autres charges financières non assimilées automatiquement aux charges d'intérêts.")
 
-    if field_code == "CHIFFRE_AFFAIRES" and section != "CPC":
-        reasons.append("CHIFFRE_AFFAIRES hors CPC.")
+    if field_code == "CHIFFRE_AFFAIRES":
+        if section != "CPC":
+            reasons.append("CHIFFRE_AFFAIRES hors CPC.")
+        if section == "DETAIL_CPC":
+            reasons.append("CHIFFRE_AFFAIRES refusé depuis DETAIL_CPC.")
 
     if field_code == "ENCOURS_LEASING" and "redevance" in label:
         reasons.append("Une redevance de crédit-bail n'est pas un encours.")
@@ -278,7 +364,7 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
             score += 60.0
 
     if section == "CPC" and candidate.period == "N":
-        if any(token in column for token in ("totaux", "total", "3 = 1 + 2", "3=1+2")):
+        if any(token in column for token in ("totaux", "total", "3 1 2", "3 = 1 + 2", "3=1+2")):
             score += 60.0
 
     exact_hints = {
@@ -318,6 +404,7 @@ def group_candidates_by_field(outputs: list[FinancialMappingOutput]) -> dict[str
     grouped: dict[str, list[FinancialCandidate]] = defaultdict(list)
     for output in outputs:
         for candidate in output.candidates:
+            candidate = infer_period_from_column(candidate)
             candidate = canonicalize_candidate_period(candidate)
             if candidate.field_code == "UNKNOWN":
                 continue
@@ -397,12 +484,33 @@ def _eligible_sorted(candidates: list[FinancialCandidate]) -> list[tuple[Financi
     return [(c, a) for c, a, _ in prepared]
 
 
+def _has_suspected_row_shift(candidate: FinancialCandidate) -> bool:
+    return any("suspected_row_shift" in w for w in candidate.warnings)
+
+
 def _pick_best(candidates: list[FinancialCandidate]) -> FinancialValue | None:
     ranked = _eligible_sorted(candidates)
     if not ranked:
         return None
 
     best_candidate, best_amount = ranked[0]
+    code = str(best_candidate.field_code)
+
+    if (
+        code in {"CLIENTS", "FOURNISSEURS", "STOCKS"}
+        and _has_suspected_row_shift(best_candidate)
+    ):
+        return _financial_value(
+            code,
+            None,
+            "ambiguous",
+            [_to_provenance(best_candidate)],
+            warnings=[
+                "suspected_row_shift : confirmation automatique refusée, "
+                "revue manuelle requise."
+            ],
+        )
+
     best_priority = candidate_priority(best_candidate)
     tied = [
         (candidate, amount)
@@ -410,7 +518,6 @@ def _pick_best(candidates: list[FinancialCandidate]) -> FinancialValue | None:
         if abs(candidate_priority(candidate) - best_priority) <= _PRIORITY_TIE_MARGIN
     ]
     tied_amounts = {amount for _, amount in tied}
-    code = str(best_candidate.field_code)
 
     if len(tied_amounts) > 1:
         return _financial_value(
@@ -428,6 +535,8 @@ def _pick_best(candidates: list[FinancialCandidate]) -> FinancialValue | None:
         warnings.append(
             f"{len(ranked) - 1} candidat(s) Qwen de priorité inférieure conservé(s) uniquement dans l'audit."
         )
+    if _has_suspected_row_shift(best_candidate):
+        warnings.append("suspected_row_shift signalé par Qwen.")
     return _financial_value(
         code,
         best_amount,
@@ -544,6 +653,150 @@ def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) ->
     return _pick_best(candidates)
 
 
+def _usable_fv(fv: FinancialValue | None) -> bool:
+    return (
+        fv is not None
+        and fv.status in {"confirmed", "derived"}
+        and fv.value is not None
+    )
+
+
+def _prefer_derived_when_ocr_conflicts(
+    resolved: dict[str, FinancialValue],
+    code: str,
+    calculated: Decimal,
+    components: list[FinancialValue],
+    formula_warning: str,
+) -> None:
+    provenances: list[ValueProvenance] = []
+    for component in components:
+        provenances.extend(component.provenance)
+
+    existing = resolved.get(code)
+    if (
+        existing is not None
+        and existing.value is not None
+        and existing.status in {"confirmed", "derived"}
+        and not _amounts_agree(existing.value, calculated)
+    ):
+        resolved[code] = _financial_value(
+            code,
+            calculated,
+            "derived",
+            existing.provenance + provenances,
+            warnings=[
+                (
+                    f"{code} OCR ({existing.value}) contredit le calcul "
+                    f"comptable ({calculated}). Valeur calculée retenue."
+                ),
+                formula_warning,
+                "Observation OCR conservée en provenance mais marquée conflicting.",
+            ],
+        )
+        return
+
+    if existing is None or existing.value is None or existing.status == "missing":
+        resolved[code] = _financial_value(
+            code,
+            calculated,
+            "derived",
+            provenances,
+            warnings=[formula_warning],
+        )
+
+
+def _apply_accounting_derivations(resolved: dict[str, FinancialValue]) -> None:
+    """Dérive les agrégats calculables en Decimal ; privilégie le calcul fiable."""
+    pf = resolved.get("PRODUITS_FINANCIERS")
+    cf = resolved.get("CHARGES_FINANCIERES")
+    if _usable_fv(pf) and _usable_fv(cf):
+        assert pf is not None and cf is not None
+        assert pf.value is not None and cf.value is not None
+        _prefer_derived_when_ocr_conflicts(
+            resolved,
+            "RESULTAT_FINANCIER",
+            pf.value - cf.value,
+            [pf, cf],
+            "Dérivé : PRODUITS_FINANCIERS - CHARGES_FINANCIERES",
+        )
+
+    pnc = resolved.get("PRODUITS_NON_COURANTS")
+    cnc = resolved.get("CHARGES_NON_COURANTES")
+    if _usable_fv(pnc) and _usable_fv(cnc):
+        assert pnc is not None and cnc is not None
+        assert pnc.value is not None and cnc.value is not None
+        _prefer_derived_when_ocr_conflicts(
+            resolved,
+            "RESULTAT_NON_COURANT",
+            pnc.value - cnc.value,
+            [pnc, cnc],
+            "Dérivé : PRODUITS_NON_COURANTS - CHARGES_NON_COURANTES",
+        )
+
+    rc = resolved.get("RESULTAT_COURANT")
+    rnc = resolved.get("RESULTAT_NON_COURANT")
+    if _usable_fv(rc) and _usable_fv(rnc):
+        assert rc is not None and rnc is not None
+        assert rc.value is not None and rnc.value is not None
+        _prefer_derived_when_ocr_conflicts(
+            resolved,
+            "RESULTAT_AVANT_IMPOT",
+            rc.value + rnc.value,
+            [rc, rnc],
+            "Dérivé : RESULTAT_COURANT + RESULTAT_NON_COURANT",
+        )
+
+    ra = resolved.get("RESULTAT_AVANT_IMPOT")
+    impot = resolved.get("IMPOT_SUR_RESULTATS")
+    if _usable_fv(ra) and _usable_fv(impot) and "RESULTAT_NET" not in resolved:
+        assert ra is not None and impot is not None
+        assert ra.value is not None and impot.value is not None
+        _prefer_derived_when_ocr_conflicts(
+            resolved,
+            "RESULTAT_NET",
+            ra.value - impot.value,
+            [ra, impot],
+            "Dérivé : RESULTAT_AVANT_IMPOT - IMPOT_SUR_RESULTATS",
+        )
+
+    ta = resolved.get("TRESORERIE_ACTIF")
+    tp = resolved.get("TRESORERIE_PASSIF")
+    if _usable_fv(ta) and _usable_fv(tp):
+        assert ta is not None and tp is not None
+        assert ta.value is not None and tp.value is not None
+        # Champ dataset séparément via _apply_simple_derived ; garder aussi code résolu.
+        resolved.setdefault(
+            "TRESORERIE_NETTE",
+            _financial_value(
+                "TRESORERIE_NETTE",
+                ta.value - tp.value,
+                "derived",
+                ta.provenance + tp.provenance,
+                warnings=["Dérivé : TRESORERIE_ACTIF - TRESORERIE_PASSIF"],
+            ),
+        )
+
+    rev = resolved.get("ACHATS_REVENDUS")
+    cons = resolved.get("ACHATS_CONSOMMES")
+    if (
+        _usable_fv(rev)
+        and _usable_fv(cons)
+        and (
+            "ACHATS_TOTAL" not in resolved
+            or resolved["ACHATS_TOTAL"].value is None
+        )
+    ):
+        assert rev is not None and cons is not None
+        assert rev.value is not None and cons.value is not None
+        resolved["ACHATS_TOTAL"] = _financial_value(
+            "ACHATS_TOTAL",
+            rev.value + cons.value,
+            "derived",
+            rev.provenance + cons.provenance,
+            warnings=["Dérivé : ACHATS_REVENDUS + ACHATS_CONSOMMES"],
+        )
+
+
 def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[str, FinancialValue]:
     grouped = group_candidates_by_field(outputs)
     resolved: dict[str, FinancialValue] = {}
@@ -593,6 +846,8 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
             rev.provenance + cons.provenance,
             warnings=["Dérivé : ACHATS_REVENDUS + ACHATS_CONSOMMES"],
         )
+
+    _apply_accounting_derivations(resolved)
 
     if "ENCOURS_LEASING" not in resolved:
         resolved["ENCOURS_LEASING"] = _financial_value(

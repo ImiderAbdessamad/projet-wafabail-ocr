@@ -287,7 +287,7 @@ def serdilab_mapping_outputs() -> list[FinancialMappingOutput]:
                 ),
                 _c(
                     "RESULTAT_FINANCIER",
-                    "-193 846,67",
+                    "200 928,82",
                     section="CPC",
                     label="Résultat financier",
                     column="Totaux de l'exercice",
@@ -385,6 +385,7 @@ def test_serdilab_resolved_values():
     assert resolved["PRODUITS_FINANCIERS"].value == Decimal("7082.15")
     assert resolved["CHARGES_FINANCIERES"].value == Decimal("200928.82")
     assert resolved["RESULTAT_FINANCIER"].value == Decimal("-193846.67")
+    assert resolved["RESULTAT_FINANCIER"].status == "derived"
     assert resolved["RESULTAT_COURANT"].value == Decimal("1187736.60")
     assert resolved["PRODUITS_NON_COURANTS"].value == Decimal("64027.85")
     assert resolved["CHARGES_NON_COURANTES"].value == Decimal("71955.29")

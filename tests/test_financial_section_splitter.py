@@ -102,3 +102,80 @@ def test_continuation_page_keeps_previous_section():
     )
     sections = split_financial_sections(extraction)
     assert sections[-1].section == "CPC"
+
+
+def test_implicit_bilan_actif_without_title():
+    from app.services.financial_section_splitter import infer_implicit_section
+
+    markdown = """
+| Éléments | Brut | Amort | Net | Exercice précédent |
+|---|---:|---:|---:|---:|
+| IMMOBILISATION EN NON VALEUR | 1 | 0 | 1 | 1 |
+| IMMOBILISATIONS INCORPORELLES | 2 | 0 | 2 | 2 |
+| IMMOBILISATIONS CORPORELLES | 3 | 0 | 3 | 3 |
+| STOCKS (f) | 4 | 0 | 4 | 4 |
+| CREANCES DE L'ACTIF CIRCULANT | 5 | 0 | 5 | 5 |
+| TRESORERIE - ACTIF | 6 | 0 | 6 | 6 |
+| TOTAL GENERAL I+II+III | 10 | 0 | 10 | 10 |
+"""
+    assert infer_implicit_section(markdown) == "BILAN_ACTIF"
+
+    extraction = PdfContentExtractionResult(
+        source_filename="serdilab.pdf",
+        pages_total=1,
+        pages_processed=1,
+        pages_ok=1,
+        pages_failed=0,
+        model="x",
+        ollama_url="http://localhost:11434",
+        processing_time_ms=1,
+        pages=[
+            PdfPageExtraction(
+                page_number=2,
+                status="ok",
+                content=markdown,
+                char_count=len(markdown),
+            )
+        ],
+    )
+    sections = split_financial_sections(extraction)
+    assert any(s.section == "BILAN_ACTIF" for s in sections)
+
+
+def test_split_identification_then_bilan_actif():
+    markdown = """
+Pièces annexes à la déclaration
+Identification du contribuable
+Raison sociale : SERDILAB SARL
+ICE : 001234567000012
+
+IMMOBILISATION EN NON VALEUR | 100 | 0 | 100 |
+IMMOBILISATIONS INCORPORELLES | 200 | 0 | 200 |
+IMMOBILISATIONS CORPORELLES | 300 | 0 | 300 |
+STOCKS (f) | 400 | 0 | 400 |
+CREANCES DE L'ACTIF CIRCULANT | 500 | 0 | 500 |
+TRESORERIE - ACTIF | 600 | 0 | 600 |
+"""
+    extraction = PdfContentExtractionResult(
+        source_filename="serdilab.pdf",
+        pages_total=1,
+        pages_processed=1,
+        pages_ok=1,
+        pages_failed=0,
+        model="x",
+        ollama_url="http://localhost:11434",
+        processing_time_ms=1,
+        pages=[
+            PdfPageExtraction(
+                page_number=1,
+                status="ok",
+                content=markdown,
+                char_count=len(markdown),
+            )
+        ],
+    )
+    sections = split_financial_sections(extraction)
+    kinds = [s.section for s in sections]
+    assert "IDENTIFICATION" in kinds
+    assert "BILAN_ACTIF" in kinds
+    assert kinds.index("IDENTIFICATION") < kinds.index("BILAN_ACTIF")

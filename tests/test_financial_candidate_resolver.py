@@ -391,3 +391,274 @@ def test_no_float_in_final_amounts():
     ]
     resolved = resolve_financial_candidates(outputs)
     assert type(resolved["CHIFFRE_AFFAIRES"].value) is Decimal
+
+
+def test_infer_period_from_column_normalizes_n1():
+    from app.services.financial_candidate_resolver import infer_period_from_column
+
+    c = _cand(
+        "FONDS_PROPRES",
+        "7 934 906,01",
+        section="BILAN_PASSIF",
+        column="Exercice précédent",
+        period="N",
+        label="TOTAL DES CAPITAUX PROPRES",
+    )
+    fixed = infer_period_from_column(c)
+    assert fixed.period == "N_MINUS_1"
+    assert any("normalisée" in w.lower() for w in fixed.warnings)
+
+
+def test_n1_code_canonicalization_before_grouping():
+    outputs = [
+        FinancialMappingOutput(
+            section="BILAN_PASSIF",
+            candidates=[
+                _cand(
+                    "FONDS_PROPRES",
+                    "7 934 906,01",
+                    section="BILAN_PASSIF",
+                    column="Exercice précédent",
+                    period="N_MINUS_1",
+                    label="TOTAL DES CAPITAUX PROPRES",
+                    nature="SECTION_TOTAL",
+                )
+            ],
+        )
+    ]
+    resolved = resolve_financial_candidates(outputs)
+    assert resolved["FONDS_PROPRES_N1"].value == Decimal("7934906.01")
+    assert "FONDS_PROPRES" not in resolved
+
+
+def test_total_passif_rejects_intermediate_totals():
+    c_i = _cand(
+        "TOTAL_PASSIF",
+        "9 114 715,17",
+        section="BILAN_PASSIF",
+        column="Exercice",
+        label="TOTAL I",
+        nature="SECTION_TOTAL",
+    )
+    ok, reasons = candidate_is_eligible(c_i)
+    assert ok is False
+    assert any("intermédiaire" in r.lower() for r in reasons)
+
+    c_ok = _cand(
+        "TOTAL_PASSIF",
+        "22 303 497,11",
+        section="BILAN_PASSIF",
+        column="Exercice",
+        label="TOTAL GENERAL I+II+III",
+        nature="GRAND_TOTAL",
+    )
+    ok2, _ = candidate_is_eligible(c_ok)
+    assert ok2 is True
+
+
+def test_suspected_row_shift_blocks_clients_auto_confirm():
+    c = _cand(
+        "CLIENTS",
+        "19 097 949,49",
+        label="Clients et comptes rattachés",
+        section="BILAN_ACTIF",
+        column="Net",
+        confidence=0.4,
+    )
+    c = c.model_copy(update={"warnings": ["suspected_row_shift"]})
+    outputs = [FinancialMappingOutput(section="BILAN_ACTIF", candidates=[c])]
+    resolved = resolve_financial_candidates(outputs)
+    assert resolved["CLIENTS"].status == "ambiguous"
+    assert resolved["CLIENTS"].value is None
+
+
+def test_serdilab_resultat_financier_derived_from_components():
+    outputs = [
+        FinancialMappingOutput(
+            section="CPC",
+            candidates=[
+                _cand(
+                    "PRODUITS_FINANCIERS",
+                    "7 082,15",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Produits financiers",
+                ),
+                _cand(
+                    "CHARGES_FINANCIERES",
+                    "200 928,82",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Charges financières",
+                ),
+                _cand(
+                    "RESULTAT_FINANCIER",
+                    "200 928,82",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Résultat financier",
+                ),
+            ],
+        )
+    ]
+    resolved = resolve_financial_candidates(outputs)
+    assert resolved["RESULTAT_FINANCIER"].value == Decimal("-193846.67")
+    assert resolved["RESULTAT_FINANCIER"].status == "derived"
+    assert any("contredit" in w.lower() for w in resolved["RESULTAT_FINANCIER"].warnings)
+
+
+def test_serdilab_core_resolved_fields():
+    outputs = [
+        FinancialMappingOutput(
+            section="BILAN_PASSIF",
+            candidates=[
+                _cand(
+                    "FONDS_PROPRES",
+                    "9 114 715,17",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="TOTAL DES CAPITAUX PROPRES",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "TOTAL_PASSIF",
+                    "22 303 497,11",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="TOTAL GENERAL I+II+III",
+                    nature="GRAND_TOTAL",
+                ),
+                _cand(
+                    "TOTAL_PASSIF",
+                    "9 114 715,17",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="TOTAL I",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "DETTES_FINANCIERES",
+                    "133 308,11",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="DETTES DE FINANCEMENT",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "PASSIF_CIRCULANT",
+                    "13 055 473,83",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="Total II Passif circulant",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "TRESORERIE_PASSIF",
+                    "0,00",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="Total III Trésorerie-Passif",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "RESULTAT_NET",
+                    "1 179 809,16",
+                    section="BILAN_PASSIF",
+                    column="Exercice",
+                    label="Résultat net",
+                ),
+            ],
+        ),
+        FinancialMappingOutput(
+            section="CPC",
+            candidates=[
+                _cand(
+                    "CHIFFRE_AFFAIRES",
+                    "13 404 177,00",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Chiffre d'affaires",
+                ),
+                _cand(
+                    "CHIFFRE_AFFAIRES",
+                    "1,00",
+                    section="DETAIL_CPC",
+                    column="Exercice",
+                    label="Chiffre d'affaires",
+                ),
+                _cand(
+                    "RESULTAT_NET",
+                    "1 179 809,16",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="XIII RESULTAT NET",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "RESULTAT_NET",
+                    "1 179 809,16",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="XVI RESULTAT NET",
+                    nature="SECTION_TOTAL",
+                ),
+                _cand(
+                    "CHARGES_INTERETS",
+                    "95 394,47",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Charges d'intérêts",
+                ),
+                _cand(
+                    "PRODUITS_FINANCIERS",
+                    "7 082,15",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Produits financiers",
+                ),
+                _cand(
+                    "CHARGES_FINANCIERES",
+                    "200 928,82",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Charges financières",
+                ),
+                _cand(
+                    "RESULTAT_FINANCIER",
+                    "200 928,82",
+                    section="CPC",
+                    column="3 = 1 + 2",
+                    label="Résultat financier",
+                ),
+            ],
+        ),
+        FinancialMappingOutput(
+            section="BILAN_ACTIF",
+            candidates=[
+                _cand(
+                    "TOTAL_ACTIF",
+                    "22 303 497,11",
+                    section="BILAN_ACTIF",
+                    column="Net",
+                    label="TOTAL GENERAL I+II+III",
+                    nature="GRAND_TOTAL",
+                ),
+            ],
+        ),
+    ]
+    resolved = resolve_financial_candidates(outputs)
+    assert resolved["FONDS_PROPRES"].value == Decimal("9114715.17")
+    assert resolved["RESULTAT_NET"].value == Decimal("1179809.16")
+    assert resolved["RESULTAT_NET"].status == "confirmed"
+    assert resolved["TOTAL_PASSIF"].value == Decimal("22303497.11")
+    assert resolved["CHIFFRE_AFFAIRES"].value == Decimal("13404177.00")
+    assert resolved["DETTES_FINANCIERES"].value == Decimal("133308.11")
+    assert resolved["PASSIF_CIRCULANT"].value == Decimal("13055473.83")
+    assert resolved["TRESORERIE_PASSIF"].value == Decimal("0.00")
+    assert resolved["CHARGES_INTERETS"].value == Decimal("95394.47")
+    assert resolved["PRODUITS_FINANCIERS"].value == Decimal("7082.15")
+    assert resolved["CHARGES_FINANCIERES"].value == Decimal("200928.82")
+    assert resolved["RESULTAT_FINANCIER"].value == Decimal("-193846.67")
+    assert resolved["RESULTAT_FINANCIER"].status == "derived"
+    assert resolved["TOTAL_ACTIF"].value == Decimal("22303497.11")
+    assert resolved["TOTAL_BILAN"].value == Decimal("22303497.11")

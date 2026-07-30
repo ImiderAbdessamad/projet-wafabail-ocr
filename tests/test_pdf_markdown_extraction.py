@@ -133,6 +133,20 @@ def test_vision_output_insufficient():
     assert len(long_enough) >= 120
     assert _vision_output_is_insufficient(long_enough) is False
 
+    # Page textuelle d'identification sans vrai tableau : pas insuffisante.
+    identification = "\n".join(
+        [
+            "Pièces annexes à la déclaration",
+            "Identification du contribuable",
+            "Raison sociale : SERDILAB",
+            "ICE : 123456789000012",
+            "Adresse : Casablanca Maroc",
+            "Exercice clos le 31/12/2024",
+        ]
+    )
+    assert len(identification) >= 120
+    assert _vision_output_is_insufficient(identification) is False
+
 
 def test_page_vide_status_ok():
     result = _vision_page_result(1, "[PAGE VIDE]", 12.0, extraction_strategy="full_page")

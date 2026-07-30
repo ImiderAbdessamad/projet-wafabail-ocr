@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from app.schemas.financial_mapping import (
     FinancialSection,
     FinancialSectionInput,
 )
 from app.schemas.pdf_extraction import PdfContentExtractionResult
+from app.services.financial_normalizer import normalize_label
 
 
 _SECTION_START_PATTERNS: list[tuple[FinancialSection, re.Pattern[str]]] = [
@@ -60,6 +62,42 @@ _CONTINUATION_SECTIONS: set[FinancialSection] = {
     "RESULTAT_FISCAL",
 }
 
+_IMPLICIT_SECTION_MARKERS: dict[FinancialSection, tuple[str, ...]] = {
+    "BILAN_ACTIF": (
+        "immobilisation en non valeur",
+        "immobilisations incorporelles",
+        "immobilisations corporelles",
+        "creances de l actif circulant",
+        "tresorerie actif",
+        "stocks f",
+    ),
+    "BILAN_PASSIF": (
+        "capitaux propres",
+        "dettes de financement",
+        "passif circulant",
+        "tresorerie passif",
+    ),
+    "CPC": (
+        "produits d exploitation",
+        "charges d exploitation",
+        "resultat d exploitation",
+        "produits financiers",
+        "charges financieres",
+    ),
+}
+
+_BILAN_ACTIF_SPLIT_MARKERS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"immobilisation\s+en\s+non\s+valeur", re.IGNORECASE),
+    re.compile(r"immobilisations\s+incorporelles", re.IGNORECASE),
+    re.compile(r"immobilisations\s+corporelles", re.IGNORECASE),
+)
+
+
+def _fold(text: str) -> str:
+    normalized = normalize_label(text or "")
+    decomposed = unicodedata.normalize("NFKD", normalized)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
 
 def _find_section_starts(markdown: str) -> list[tuple[int, FinancialSection]]:
     starts: list[tuple[int, FinancialSection]] = []
@@ -77,6 +115,90 @@ def _find_section_starts(markdown: str) -> list[tuple[int, FinancialSection]]:
         deduplicated.append((position, section))
 
     return deduplicated
+
+
+def infer_implicit_section(markdown: str) -> FinancialSection | None:
+    normalized = _fold(markdown)
+    scores: dict[str, int] = {}
+
+    for section, markers in _IMPLICIT_SECTION_MARKERS.items():
+        scores[section] = sum(1 for marker in markers if marker in normalized)
+
+    best_section = max(scores, key=scores.get)  # type: ignore[arg-type]
+    if scores[best_section] >= 2:
+        return best_section  # type: ignore[return-value]
+    return None
+
+
+def _find_implicit_bilan_actif_start(markdown: str) -> int | None:
+    positions = [
+        match.start()
+        for pattern in _BILAN_ACTIF_SPLIT_MARKERS
+        for match in pattern.finditer(markdown)
+    ]
+    return min(positions) if positions else None
+
+
+def _maybe_split_identification_and_actif(
+    markdown: str,
+    page_number: int,
+    section: FinancialSection,
+) -> list[FinancialSectionInput]:
+    """Sépare IDENTIFICATION et BILAN_ACTIF sur une même page/sortie."""
+    actif_start = _find_implicit_bilan_actif_start(markdown)
+    if actif_start is None or actif_start < 20:
+        return [
+            FinancialSectionInput(
+                section=section,
+                page_number=page_number,
+                markdown=markdown,
+            )
+        ]
+
+    prefix = markdown[:actif_start].strip()
+    actif = markdown[actif_start:].strip()
+    prefix_fold = _fold(prefix)
+    looks_like_identification = (
+        section == "IDENTIFICATION"
+        or "identification" in prefix_fold
+        or "pieces annexes" in prefix_fold
+        or "raison sociale" in prefix_fold
+        or "contribuable" in prefix_fold
+    )
+
+    if not looks_like_identification and section != "IDENTIFICATION":
+        return [
+            FinancialSectionInput(
+                section=section,
+                page_number=page_number,
+                markdown=markdown,
+            )
+        ]
+
+    outputs: list[FinancialSectionInput] = []
+    if len(prefix) >= 20:
+        outputs.append(
+            FinancialSectionInput(
+                section="IDENTIFICATION",
+                page_number=page_number,
+                markdown=prefix,
+            )
+        )
+    if len(actif) >= 20:
+        outputs.append(
+            FinancialSectionInput(
+                section="BILAN_ACTIF",
+                page_number=page_number,
+                markdown=actif,
+            )
+        )
+    return outputs or [
+        FinancialSectionInput(
+            section=section,
+            page_number=page_number,
+            markdown=markdown,
+        )
+    ]
 
 
 def split_financial_sections(
@@ -97,7 +219,17 @@ def split_financial_sections(
         starts = _find_section_starts(markdown)
 
         if not starts:
-            if previous_section in _CONTINUATION_SECTIONS:
+            implicit = infer_implicit_section(markdown)
+            if implicit is not None:
+                for item in _maybe_split_identification_and_actif(
+                    markdown,
+                    page.page_number,
+                    implicit,
+                ):
+                    outputs.append(item)
+                    if item.section in _CONTINUATION_SECTIONS:
+                        previous_section = item.section
+            elif previous_section in _CONTINUATION_SECTIONS:
                 outputs.append(
                     FinancialSectionInput(
                         section=previous_section,
@@ -106,13 +238,25 @@ def split_financial_sections(
                     )
                 )
             else:
-                outputs.append(
-                    FinancialSectionInput(
-                        section="AUTRE",
-                        page_number=page.page_number,
-                        markdown=markdown,
+                # Dernier recours : IDENTIFICATION si marqueurs faibles, sinon AUTRE
+                folded = _fold(markdown)
+                if "identification" in folded or "pieces annexes" in folded:
+                    for item in _maybe_split_identification_and_actif(
+                        markdown,
+                        page.page_number,
+                        "IDENTIFICATION",
+                    ):
+                        outputs.append(item)
+                        if item.section in _CONTINUATION_SECTIONS:
+                            previous_section = item.section
+                else:
+                    outputs.append(
+                        FinancialSectionInput(
+                            section="AUTRE",
+                            page_number=page.page_number,
+                            markdown=markdown,
+                        )
                     )
-                )
             continue
 
         first_position = starts[0][0]
@@ -132,14 +276,13 @@ def split_financial_sections(
             if len(segment) < 20:
                 continue
 
-            outputs.append(
-                FinancialSectionInput(
-                    section=section,
-                    page_number=page.page_number,
-                    markdown=segment,
-                )
-            )
-            if section in _CONTINUATION_SECTIONS:
-                previous_section = section
+            for item in _maybe_split_identification_and_actif(
+                segment,
+                page.page_number,
+                section,
+            ):
+                outputs.append(item)
+                if item.section in _CONTINUATION_SECTIONS:
+                    previous_section = item.section
 
     return outputs

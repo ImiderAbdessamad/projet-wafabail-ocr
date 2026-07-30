@@ -82,7 +82,6 @@ FinancialFieldCode = Literal[
 CandidatePeriod = Literal[
     "N",
     "N_MINUS_1",
-    "UNKNOWN",
 ]
 
 
@@ -109,9 +108,9 @@ class MappingEvidence(BaseModel):
 class FinancialCandidate(BaseModel):
     field_code: FinancialFieldCode
     raw_value: str | None = None
-    period: CandidatePeriod = "UNKNOWN"
-    nature: CandidateNature = "UNKNOWN"
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    period: CandidatePeriod
+    nature: CandidateNature
+    confidence: float = Field(ge=0.0, le=1.0)
     evidence: MappingEvidence
     warnings: list[str] = Field(default_factory=list)
 
@@ -133,6 +132,10 @@ class FinancialMappingBatchResult(BaseModel):
     model: str
     mapped_sections: list[FinancialMappingOutput] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    processed_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    failed_sections: list[str] = Field(default_factory=list)
 
 
 class FinancialMappingAudit(BaseModel):
@@ -142,6 +145,7 @@ class FinancialMappingAudit(BaseModel):
     model: str
     sections_detected: int
     sections_processed: int
+    sections_skipped: int = 0
     sections_failed: int
     candidates_total: int
     candidates_by_field: dict[str, int] = Field(default_factory=dict)

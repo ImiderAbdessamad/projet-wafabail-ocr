@@ -188,6 +188,9 @@ def test_autre_and_identification_skipped():
     mocked.assert_not_called()
     assert result.mapped_sections == []
     assert result.model == OLLAMA_MAPPING_MODEL
+    assert result.skipped_count == 2
+    assert result.processed_count == 0
+    assert result.failed_count == 0
 
 
 def test_valid_output_validated_by_pydantic():

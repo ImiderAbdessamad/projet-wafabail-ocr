@@ -210,15 +210,26 @@ def _vision_output_is_insufficient(markdown: str) -> bool:
     if len(content) < 120:
         return True
 
-    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    lines = [
+        line.strip()
+        for line in content.splitlines()
+        if line.strip()
+    ]
 
     if len(lines) < 4:
         return True
 
-    if _markdown_table_quality(content) < 0.70:
-        return True
+    table_lines = [
+        line
+        for line in lines
+        if line.startswith("|") and line.endswith("|")
+    ]
 
-    return False
+    # Une page textuelle sans tableau n'est pas insuffisante.
+    if len(table_lines) < 3:
+        return False
+
+    return _markdown_table_quality(content) < 0.70
 
 
 def _vision_page_result(
