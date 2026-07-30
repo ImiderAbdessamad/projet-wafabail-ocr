@@ -17,22 +17,18 @@ FinancialSection = Literal[
 ]
 
 
+# Codes exposés à Qwen : jamais de suffixe _N1 (period porte N / N-1).
 FinancialFieldCode = Literal[
     "EXERCICE",
     "CHIFFRE_AFFAIRES",
-    "CHIFFRE_AFFAIRES_N1",
     "RESULTAT_NET",
     "RESULTAT_NET_XIII",
     "RESULTAT_NET_XVI",
-    "RESULTAT_NET_N1",
     "RESULTAT_EXPLOITATION",
-    "RESULTAT_EXPLOITATION_N1",
     "TOTAL_BILAN",
-    "TOTAL_BILAN_N1",
     "TOTAL_ACTIF",
     "TOTAL_PASSIF",
     "FONDS_PROPRES",
-    "FONDS_PROPRES_N1",
     "ACTIFS_IMMOBILISES",
     "ACTIF_CIRCULANT",
     "PASSIF_CIRCULANT",
@@ -95,19 +91,31 @@ CandidateNature = Literal[
 ]
 
 
+ColumnRole = Literal[
+    "BRUT",
+    "AMORT_PROV",
+    "NET_N",
+    "EXERCICE_N",
+    "TOTAL_EXERCICE_N",
+    "EXERCICE_N1",
+    "UNKNOWN",
+]
+
+
 class MappingEvidence(BaseModel):
     page_number: int
     section: FinancialSection
     raw_label: str
     raw_value: str
     column_name: str | None = None
+    column_role: ColumnRole
     source_excerpt: str
     row_index: int | None = None
 
 
 class FinancialCandidate(BaseModel):
     field_code: FinancialFieldCode
-    raw_value: str | None = None
+    raw_value: str = Field(min_length=1)
     period: CandidatePeriod
     nature: CandidateNature
     confidence: float = Field(ge=0.0, le=1.0)

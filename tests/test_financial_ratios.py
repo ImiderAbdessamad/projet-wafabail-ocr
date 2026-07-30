@@ -109,6 +109,8 @@ def test_customer_days_77_98():
 def test_ca_growth_12_57():
     r = calculate_ca_growth(reference_dataset())
     assert r.value == Decimal("12.57")
+    assert r.max_points == Decimal("0")
+    assert r.points == Decimal("0")
 
 
 def test_global_debt_2_61():

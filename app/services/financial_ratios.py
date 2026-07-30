@@ -400,26 +400,45 @@ def calculate_supplier_days(
 
 
 def calculate_ca_growth(dataset: FinancialDataset) -> RatioResult:
+    """Ratio informatif / sectoriel — aucun point dans l'axe financier."""
     ca, ca_n1 = dataset.chiffre_affaires, dataset.chiffre_affaires_n1
     if not usable(ca) or not usable(ca_n1):
-        return _non_calculable(
-            "ca_growth",
-            "Croissance du CA",
-            "(ca_n - ca_n1) / abs(ca_n1) * 100",
-            "%",
-            [ca, ca_n1],
+        return RatioResult(
+            code="ca_growth",
+            label="Croissance du CA",
+            formula="(ca_n - ca_n1) / abs(ca_n1) * 100",
+            value=None,
+            unit="%",
+            components=[_component(ca), _component(ca_n1)],
+            threshold=">= 5 %",
+            status="non_calculable",
+            points=Decimal("0"),
+            max_points=Decimal("0"),
+            warnings=["Composants manquants, ambigus ou invalides."],
         )
     assert ca.value is not None and ca_n1.value is not None
     value = safe_divide(ca.value - ca_n1.value, abs(ca_n1.value))
     if value is not None:
         value *= ONE_HUNDRED
-    return _finalize(
-        "ca_growth",
-        "Croissance du CA",
-        "(ca_n - ca_n1) / abs(ca_n1) * 100",
+    value = quantize_ratio(value)
+    status = classify_ratio(
         value,
-        "%",
-        [ca, ca_n1],
+        direction="higher_is_better",
+        good=Decimal("5.00"),
+        watch=Decimal("0.00"),
+    ) if value is not None else "non_calculable"
+    return RatioResult(
+        code="ca_growth",
+        label="Croissance du CA",
+        formula="(ca_n - ca_n1) / abs(ca_n1) * 100",
+        value=value,
+        unit="%",
+        components=[_component(ca), _component(ca_n1)],
+        threshold=">= 5 %",
+        status=status,
+        points=Decimal("0"),
+        max_points=Decimal("0"),
+        warnings=[],
     )
 
 

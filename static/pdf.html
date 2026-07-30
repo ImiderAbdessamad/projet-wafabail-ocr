@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Extraction PDF — GLM Vision</title>
+  <title>Analyse bilans PDF — Attijariwafa</title>
   <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
-  <link rel="stylesheet" href="/liasse.css?v=20260730a" />
-  <link rel="stylesheet" href="/pdf.css?v=20260730a" />
+  <link rel="stylesheet" href="/style.css?v=20260730b" />
+  <link rel="stylesheet" href="/pdf.css?v=20260730b" />
 </head>
 <body>
   <div class="page">
@@ -14,7 +14,7 @@
       <a href="/" class="tool-switch-link">Extraction CIN</a>
       <a href="/ice" class="tool-switch-link">Extraction ICE</a>
       <a href="/liasse" class="tool-switch-link">Liasse &amp; Scoring</a>
-      <a href="/pdf" class="tool-switch-link active">PDF page par page</a>
+      <a href="/pdf" class="tool-switch-link active">PDF / Bilans</a>
     </nav>
 
     <header class="header">
@@ -24,42 +24,39 @@
       </div>
       <h1>Extraction PDF &amp; Analyse financière</h1>
       <p class="subtitle">
-        Déposez un PDF : extraction Markdown page par page, puis calcul déterministe
-        des ratios et scoring crédit-bail (Decimal — sans calcul LLM).
+        Déposez un ou plusieurs bilans PDF : extraction Markdown, mapping Qwen,
+        calcul des ratios et scoring crédit-bail. Exportez chaque résultat en
+        Excel / JSON ou copiez le JSON.
       </p>
     </header>
 
     <main class="layout pdf-layout">
       <section class="card upload-card">
-        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choisir un PDF">
-          <input type="file" id="fileInput" accept="application/pdf" hidden />
+        <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choisir des PDF">
+          <input type="file" id="fileInput" accept="application/pdf" multiple hidden />
 
           <div id="dropzoneEmpty" class="dropzone-empty">
             <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M4 16.5V18a2 2 0 002 2h12a2 2 0 002-2v-1.5M7 9l5-5 5 5M12 4v12" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
-            <p class="dropzone-title">Glissez un PDF ici</p>
-            <p class="dropzone-hint">Texte natif ou scan — max 50 Mo</p>
+            <p class="dropzone-title">Glissez un ou plusieurs PDF ici</p>
+            <p class="dropzone-hint">Bilans / liasses — multi-fichiers · max 50 Mo / fichier</p>
           </div>
 
-          <div id="previewFile" class="preview-file" hidden>
-            <svg class="preview-file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4">
-              <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M14 3v5h5" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span id="previewFileName" class="preview-file-name"></span>
-            <span id="previewFileSize" class="preview-file-size"></span>
+          <div id="fileListPanel" class="file-list-panel" hidden>
+            <ul id="fileList" class="file-list"></ul>
+            <button type="button" id="clearFilesBtn" class="btn-ghost btn-sm">Vider la liste</button>
           </div>
         </div>
 
         <div class="pdf-options">
           <label class="pdf-option">
-            Pages max
+            Pages max / fichier
             <input type="number" id="maxPages" min="1" max="70" placeholder="Toutes" />
           </label>
           <label class="pdf-option checkbox">
             <input type="checkbox" id="forceVision" />
-            Forcer GLM Vision (ignorer texte natif)
+            Forcer GLM Vision
           </label>
         </div>
 
@@ -70,18 +67,18 @@
           </label>
           <label class="mode-option">
             <input type="radio" name="pdfMode" value="analyze" checked />
-            <span>Extraction + Analyse / Scoring (ratios &amp; décision)</span>
+            <span>Extraction + Analyse / Scoring</span>
           </label>
         </div>
         <p class="analyze-hint" id="modeHint">
-          Mode analyse : après OCR, le panneau « Analyse financière » affiche score, axes, ratios et champs.
+          Mode analyse : ratios, axes et décision pour chaque PDF.
         </p>
 
         <details id="analyzeOptions" class="analyze-options">
           <summary>Compléments scoring (comportemental &amp; secteur)</summary>
           <p class="analyze-hint">
-            Optionnel. Sans ces données, l’axe comportemental / sectoriel reste
-            non calculable et la décision automatique est bloquée (mode STRICT).
+            Optionnel — appliqué à tous les PDF du lot. Sans ces données, les axes
+            comportemental / sectoriel restent non calculables (mode STRICT).
           </p>
           <div class="override-grid">
             <label>Mode scoring
@@ -110,61 +107,23 @@
 
         <div class="pdf-actions">
           <button type="button" id="extractBtn" class="btn-primary" disabled>Lancer</button>
+          <button type="button" id="exportAllJsonBtn" class="btn-ghost" hidden>Exporter tout (JSON)</button>
+          <button type="button" id="exportAllExcelBtn" class="btn-ghost" hidden>Exporter tout (Excel)</button>
         </div>
         <p id="errorBox" class="error-box" hidden></p>
+        <p id="requestMeta" class="analyze-hint" hidden></p>
       </section>
 
-      <p id="requestMeta" class="analyze-hint" hidden></p>
-
-      <section id="analysisPanel" class="card result-card analysis-panel" hidden>
-        <h2 class="section-title">Analyse financière (ratios &amp; scoring)</h2>
-        <div id="decisionCard" class="decision-card"></div>
-        <div id="axesGrid" class="axes-grid"></div>
-        <div id="analysisWarnings" class="warnings-box" hidden></div>
-        <h3 class="section-subtitle">Ratios</h3>
-        <div id="ratiosGrid" class="ratios-grid"></div>
-        <h3 class="section-subtitle">Champs extraits</h3>
-        <div id="datasetGrid" class="dataset-grid"></div>
-        <details class="pdf-raw">
-          <summary>JSON analyse complète</summary>
-          <pre id="analysisRawJson"></pre>
-        </details>
-      </section>
-
-      <section id="resultPanel" class="card result-card" hidden>
-        <div class="pdf-summary">
-          <div class="pdf-badges">
-            <span id="fileBadge" class="badge"></span>
-            <span id="pagesBadge" class="badge"></span>
-            <span id="timeBadge" class="badge"></span>
-            <span id="modelBadge" class="badge"></span>
-          </div>
-          <div id="warningsBox" class="warnings-box" hidden></div>
+      <section id="resultsContainer" class="results-container" hidden>
+        <div class="results-header">
+          <h2 class="section-title">Résultats par document</h2>
+          <p id="batchSummary" class="analyze-hint"></p>
         </div>
-
-        <div class="pdf-viewer">
-          <aside class="pdf-page-list" id="pageList" aria-label="Pages du document"></aside>
-          <article class="pdf-page-detail" id="pageDetail">
-            <div class="pdf-page-header">
-              <h2 id="pageTitle">Sélectionnez une page</h2>
-              <div class="pdf-page-meta">
-                <span id="pageModeBadge" class="badge"></span>
-                <span id="pageStatusBadge" class="badge"></span>
-                <button type="button" id="copyBtn" class="btn-secondary" hidden>Copier le texte</button>
-              </div>
-            </div>
-            <pre id="pageContent" class="pdf-content"></pre>
-            <div id="pageTables" class="pdf-tables" hidden></div>
-            <p id="pageError" class="error-box" hidden></p>
-            <details id="rawJsonBlock" class="pdf-raw" hidden>
-              <summary>Réponse brute GLM (JSON)</summary>
-              <pre id="pageRawJson"></pre>
-            </details>
-          </article>
-        </div>
+        <div id="docTabs" class="doc-tabs" role="tablist"></div>
+        <div id="docPanels" class="doc-panels"></div>
       </section>
     </main>
   </div>
-  <script src="/pdf.js?v=20260730a"></script>
+  <script src="/pdf.js?v=20260730b"></script>
 </body>
 </html>

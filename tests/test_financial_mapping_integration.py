@@ -40,7 +40,21 @@ def _c(
     period: str = "N",
     nature: str = "DETAIL",
     page: int = 1,
+    column_role: str | None = None,
 ) -> FinancialCandidate:
+    if column_role is None:
+        if period == "N_MINUS_1":
+            column_role = "EXERCICE_N1"
+        elif section == "BILAN_ACTIF":
+            column_role = "NET_N"
+        elif section == "BILAN_PASSIF":
+            column_role = "EXERCICE_N"
+        elif section == "CPC":
+            column_role = "TOTAL_EXERCICE_N"
+        elif section == "DETAIL_CPC":
+            column_role = "EXERCICE_N"
+        else:
+            column_role = "UNKNOWN"
     return FinancialCandidate(
         field_code=code,  # type: ignore[arg-type]
         raw_value=raw,
@@ -53,6 +67,7 @@ def _c(
             raw_label=label,
             raw_value=raw,
             column_name=column,
+            column_role=column_role,  # type: ignore[arg-type]
             source_excerpt=f"| {label} | {raw} |",
         ),
     )
@@ -74,7 +89,7 @@ def serdilab_mapping_outputs() -> list[FinancialMappingOutput]:
                     page=2,
                 ),
                 _c(
-                    "TOTAL_BILAN_N1",
+                    "TOTAL_BILAN",
                     "19 500 619,98",
                     section="BILAN_ACTIF",
                     label="Total général (I + II + III)",
@@ -151,7 +166,7 @@ def serdilab_mapping_outputs() -> list[FinancialMappingOutput]:
                     page=3,
                 ),
                 _c(
-                    "FONDS_PROPRES_N1",
+                    "FONDS_PROPRES",
                     "7 934 906,01",
                     section="BILAN_PASSIF",
                     label="TOTAL DES CAPITAUX PROPRES",
@@ -209,7 +224,7 @@ def serdilab_mapping_outputs() -> list[FinancialMappingOutput]:
                     page=4,
                 ),
                 _c(
-                    "CHIFFRE_AFFAIRES_N1",
+                    "CHIFFRE_AFFAIRES",
                     "24 105 417,32",
                     section="CPC",
                     label="Chiffre d'affaires",
@@ -236,7 +251,7 @@ def serdilab_mapping_outputs() -> list[FinancialMappingOutput]:
                     page=4,
                 ),
                 _c(
-                    "RESULTAT_NET_N1",
+                    "RESULTAT_NET",
                     "670 378,06",
                     section="CPC",
                     label="RESULTAT NET",
@@ -479,7 +494,7 @@ def test_bilan_conflict_blocks_strict_score():
                     "TOTAL_ACTIF",
                     "100,00",
                     section="BILAN_ACTIF",
-                    label="Total général",
+                    label="TOTAL GENERAL I+II+III",
                     column="Net",
                     nature="GRAND_TOTAL",
                 )
@@ -492,7 +507,7 @@ def test_bilan_conflict_blocks_strict_score():
                     "TOTAL_PASSIF",
                     "200,00",
                     section="BILAN_PASSIF",
-                    label="Total général",
+                    label="TOTAL GENERAL I+II+III",
                     column="Exercice",
                     nature="GRAND_TOTAL",
                 )

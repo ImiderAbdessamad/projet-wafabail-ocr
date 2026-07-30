@@ -90,7 +90,7 @@ FINANCIAL_RATIO_RULES: dict[str, dict] = {
         "direction": "lower_is_better",
         "good": Decimal("60"),
         "watch": Decimal("90"),
-        "weight": Decimal("8"),
+        "weight": Decimal("10"),
         "essential": False,
         "threshold_label": "<= 60 jours",
     },
@@ -98,19 +98,13 @@ FINANCIAL_RATIO_RULES: dict[str, dict] = {
         "direction": "contextual",
         "good": None,
         "watch": None,
-        "weight": Decimal("6"),
+        "weight": Decimal("8"),
         "essential": False,
         "threshold_label": ">= délais clients",
     },
-    "ca_growth": {
-        "direction": "higher_is_better",
-        "good": Decimal("5.00"),
-        "watch": Decimal("0.00"),
-        "weight": Decimal("4"),
-        "essential": False,
-        "threshold_label": ">= 5 %",
-    },
 }
+# ca_growth retiré de l'axe financier (poids 0) — reste ratio informatif / sectoriel.
+# Somme des poids actifs = 100.
 
 # Si True : dettes_financieres inclut déjà leasing/CMT → ne pas double-compter
 DETTES_FINANCIERES_INCLUDES_LEASING = False

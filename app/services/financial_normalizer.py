@@ -40,6 +40,11 @@ def quantize_ratio(
     return value.quantize(Decimal(decimals), rounding=ROUND_HALF_UP)
 
 
+_MIXED_COMMA_AMOUNT_RE = re.compile(
+    r"^-?\d{1,3}(?:,\d{3})+,\d{2}$"
+)
+
+
 def parse_decimal_amount(raw: str | None) -> Decimal | None:
     """Parse un montant OCR vers Decimal. Jamais 0 pour une cellule vide."""
     if raw is None:
@@ -48,7 +53,31 @@ def parse_decimal_amount(raw: str | None) -> Decimal | None:
     if not text or text in {"-", "−", "–", "—", "n/a", "N/A", ""}:
         return None
     text = text.replace("\u00a0", " ").replace("\u202f", " ")
-    return parse_amount(text)
+    text = re.sub(r"\s+", "", text)
+
+    parsed = parse_amount(text)
+    if parsed is not None:
+        return parsed
+
+    # Format OCR mixte strict : 9,116,785,07 → 9116785.07
+    if _MIXED_COMMA_AMOUNT_RE.fullmatch(text):
+        parts = text.split(",")
+        normalized = "".join(parts[:-1]) + "." + parts[-1]
+        try:
+            return Decimal(normalized)
+        except Exception:
+            return None
+
+    return None
+
+
+def is_mixed_comma_ocr_amount(raw: str | None) -> bool:
+    """True si le montant suit exactement le motif OCR mixte virgules."""
+    if raw is None:
+        return False
+    text = str(raw).strip().replace("\u00a0", " ").replace("\u202f", " ")
+    text = re.sub(r"\s+", "", text)
+    return bool(_MIXED_COMMA_AMOUNT_RE.fullmatch(text))
 
 
 def normalize_label(label: str) -> str:

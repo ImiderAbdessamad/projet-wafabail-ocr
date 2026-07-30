@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import unicodedata
 from collections import defaultdict
 from decimal import Decimal
@@ -10,7 +11,12 @@ from app.config import OLLAMA_MAPPING_MODEL
 from app.schemas.financial_analysis import DataStatus, FinancialDataset, FinancialValue, ValueProvenance
 from app.schemas.financial_mapping import FinancialCandidate, FinancialMappingOutput
 from app.services.financial_dataset_builder import _apply_simple_derived, empty_dataset
-from app.services.financial_normalizer import is_explicit_zero, normalize_label, parse_decimal_amount
+from app.services.financial_normalizer import (
+    is_explicit_zero,
+    is_mixed_comma_ocr_amount,
+    normalize_label,
+    parse_decimal_amount,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +30,78 @@ _NATURE_PRIORITY: dict[str, int] = {
 }
 _PRIORITY_TIE_MARGIN = 5.0
 _AMOUNT_TOLERANCE = Decimal("1.00")
+
+# Mapping interne période N-1 → code dataset (jamais exposé à Qwen).
 _N1_CODE_MAP = {
     "CHIFFRE_AFFAIRES": "CHIFFRE_AFFAIRES_N1",
     "RESULTAT_NET": "RESULTAT_NET_N1",
     "TOTAL_BILAN": "TOTAL_BILAN_N1",
     "FONDS_PROPRES": "FONDS_PROPRES_N1",
+    "DETTES_FINANCIERES": "DETTES_FINANCIERES_N1",
 }
+
+ALLOWED_FIELDS_BY_SECTION: dict[str, set[str]] = {
+    "BILAN_ACTIF": {
+        "TOTAL_ACTIF",
+        "TOTAL_BILAN",
+        "ACTIFS_IMMOBILISES",
+        "ACTIF_CIRCULANT",
+        "STOCKS",
+        "CLIENTS",
+        "TRESORERIE_ACTIF",
+    },
+    "BILAN_PASSIF": {
+        "TOTAL_PASSIF",
+        "TOTAL_BILAN",
+        "FONDS_PROPRES",
+        "RESULTAT_NET",
+        "DETTES_FINANCIERES",
+        "PASSIF_CIRCULANT",
+        "FOURNISSEURS",
+        "TRESORERIE_PASSIF",
+    },
+    "CPC": {
+        "CHIFFRE_AFFAIRES",
+        "RESULTAT_NET",
+        "RESULTAT_NET_XIII",
+        "RESULTAT_NET_XVI",
+        "RESULTAT_EXPLOITATION",
+        "PRODUITS_EXPLOITATION",
+        "CHARGES_EXPLOITATION",
+        "PRODUITS_FINANCIERS",
+        "CHARGES_FINANCIERES",
+        "RESULTAT_FINANCIER",
+        "RESULTAT_COURANT",
+        "PRODUITS_NON_COURANTS",
+        "CHARGES_NON_COURANTES",
+        "RESULTAT_NON_COURANT",
+        "RESULTAT_AVANT_IMPOT",
+        "IMPOT_SUR_RESULTATS",
+        "ACHATS_REVENDUS",
+        "ACHATS_CONSOMMES",
+        "CHARGES_INTERETS",
+        "DOTATIONS_AMORTISSEMENTS",
+        "PRODUITS_CESSION_IMMOBILISATIONS",
+        "VALEUR_NETTE_IMMOBILISATIONS_CEDEES",
+    },
+    "DETAIL_CPC": {
+        "REDEVANCES_CREDIT_BAIL",
+    },
+    "RESULTAT_FISCAL": {
+        "RESULTAT_FISCAL",
+        "REINTEGRATIONS",
+        "DEDUCTIONS",
+        "IS_DU",
+        "COTISATION_MINIMALE",
+        "REPORT_DEFICITAIRE",
+    },
+}
+
+_TOTAL_GENERAL_RE = re.compile(
+    r"\btotal\s+(?:general\s+)?i\s*\+?\s*ii\s*\+?\s*iii\b",
+    re.IGNORECASE,
+)
+
 _ACTIF_CURRENT_FIELDS = {
     "TOTAL_ACTIF",
     "TOTAL_BILAN",
@@ -47,6 +119,7 @@ _PASSIF_CURRENT_FIELDS = {
     "PASSIF_CIRCULANT",
     "FOURNISSEURS",
     "TRESORERIE_PASSIF",
+    "RESULTAT_NET",
 }
 _CPC_CURRENT_FIELDS = {
     "CHIFFRE_AFFAIRES",
@@ -68,6 +141,9 @@ _CPC_CURRENT_FIELDS = {
     "CHARGES_INTERETS",
     "ACHATS_REVENDUS",
     "ACHATS_CONSOMMES",
+    "DOTATIONS_AMORTISSEMENTS",
+    "PRODUITS_CESSION_IMMOBILISATIONS",
+    "VALEUR_NETTE_IMMOBILISATIONS_CEDEES",
 }
 
 FIELD_ATTR_META: dict[str, tuple[str, str]] = {
@@ -91,6 +167,7 @@ FIELD_ATTR_META: dict[str, tuple[str, str]] = {
     "TRESORERIE_ACTIF": ("tresorerie_actif", "Trésorerie actif"),
     "TRESORERIE_PASSIF": ("tresorerie_passif", "Trésorerie passif"),
     "DETTES_FINANCIERES": ("dettes_financieres", "Dettes financières"),
+    "DETTES_FINANCIERES_N1": ("dettes_financieres_n1", "Dettes financières N-1"),
     "DETTES_BANCAIRES_CT": ("dettes_bancaires_ct", "Dettes bancaires CT"),
     "PRODUITS_EXPLOITATION": ("produits_exploitation", "Produits d'exploitation"),
     "CHARGES_EXPLOITATION": ("charges_exploitation", "Charges d'exploitation"),
@@ -130,6 +207,15 @@ def _fold(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
+def clean_qwen_marker(text: str) -> str:
+    return re.sub(
+        r"(?:</?think>|/think)\s*$",
+        "",
+        text.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+
+
 def validate_candidate_scope(candidate: FinancialCandidate) -> list[str]:
     _, reasons = candidate_is_eligible(candidate)
     return reasons
@@ -138,44 +224,12 @@ def validate_candidate_scope(candidate: FinancialCandidate) -> list[str]:
 def infer_period_from_column(
     candidate: FinancialCandidate,
 ) -> FinancialCandidate:
-    """Normalise period à partir de column_name — sans créer de montant."""
-    column = _fold(candidate.evidence.column_name or "")
-    section = candidate.evidence.section
+    """Normalise period à partir de column_role — sans créer de montant."""
+    role = candidate.evidence.column_role
 
-    n1_tokens = (
-        "exercice precedent",
-        "precedent",
-        "n-1",
-        "n minus 1",
-        "colonne 4",
-    )
-
-    if any(token in column for token in n1_tokens):
+    if role == "EXERCICE_N1":
         inferred = "N_MINUS_1"
-    elif section == "BILAN_ACTIF" and "net" in column:
-        inferred = "N"
-    elif (
-        section == "BILAN_PASSIF"
-        and "exercice" in column
-        and "precedent" not in column
-    ):
-        inferred = "N"
-    elif (
-        section in {"CPC", "DETAIL_CPC"}
-        and any(
-            token in column
-            for token in (
-                "3 1 2",
-                "3 = 1 + 2",
-                "3=1+2",
-                "total exercice",
-                "totaux de l exercice",
-                "totaux de lexercice",
-                "exercice",
-            )
-        )
-        and "precedent" not in column
-    ):
+    elif role in {"NET_N", "EXERCICE_N", "TOTAL_EXERCICE_N"}:
         inferred = "N"
     else:
         return candidate
@@ -190,7 +244,7 @@ def infer_period_from_column(
                 *candidate.warnings,
                 (
                     "Période normalisée par Python "
-                    f"à partir de la colonne : {inferred}."
+                    f"à partir de column_role : {inferred}."
                 ),
             ],
         }
@@ -198,63 +252,86 @@ def infer_period_from_column(
 
 
 def canonicalize_candidate_period(candidate: FinancialCandidate) -> FinancialCandidate:
-    if candidate.period != "N_MINUS_1":
-        return candidate
-    mapped_code = _N1_CODE_MAP.get(str(candidate.field_code))
-    if mapped_code is None:
-        return candidate
-    return candidate.model_copy(update={"field_code": mapped_code})
+    """Rétrocompat : ne mute plus field_code (interdit dans le schéma Qwen)."""
+    return candidate
 
 
-def _is_total_general_label(label: str) -> bool:
-    normalized = _fold(label)
-    allowed = (
-        "total i ii iii",
-        "total i+ii+iii",
-        "total general",
-        "total passif",
-        "total actif",
+def dataset_field_code(candidate: FinancialCandidate) -> str:
+    """Clé dataset interne : (code métier, period) → attr N ou N-1."""
+    code = str(candidate.field_code)
+    if candidate.period == "N_MINUS_1":
+        return _N1_CODE_MAP.get(code, code)
+    return code
+
+
+def is_total_general_candidate(candidate: FinancialCandidate) -> bool:
+    label = normalize_label(candidate.evidence.raw_label)
+    return (
+        candidate.nature == "GRAND_TOTAL"
+        and bool(_TOTAL_GENERAL_RE.search(label))
     )
-    return any(token in normalized for token in allowed)
 
 
 def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     label = _fold(candidate.evidence.raw_label)
-    column = _fold(candidate.evidence.column_name or "")
+    role = candidate.evidence.column_role
     section = candidate.evidence.section
     field_code = str(candidate.field_code)
+    resolved_code = dataset_field_code(candidate)
 
     if field_code == "UNKNOWN":
         reasons.append("Code UNKNOWN non résolvable.")
 
-    if field_code.endswith("_N1"):
-        if candidate.period != "N_MINUS_1":
-            reasons.append("Un champ N-1 exige period=N_MINUS_1.")
+    allowed = ALLOWED_FIELDS_BY_SECTION.get(section, set())
+    if field_code not in allowed:
+        reasons.append(f"{field_code} interdit dans la section {section}.")
+
+    if candidate.period == "N_MINUS_1":
+        if field_code not in _N1_CODE_MAP:
+            reasons.append(
+                f"Période N-1 non supportée pour le champ {field_code}."
+            )
+        if role != "EXERCICE_N1":
+            reasons.append("Un champ N-1 exige column_role=EXERCICE_N1.")
     else:
         if candidate.period != "N":
             reasons.append("Un champ courant exige period=N.")
 
-    if section == "BILAN_ACTIF" and candidate.period == "N" and field_code in _ACTIF_CURRENT_FIELDS:
-        if "net" not in column:
-            reasons.append("Le bilan actif courant exige la colonne Net.")
-        if "precedent" in column or "brut" in column:
-            reasons.append("La colonne Brut ou N-1 est interdite.")
+    if (
+        section == "BILAN_ACTIF"
+        and candidate.period == "N"
+        and field_code in _ACTIF_CURRENT_FIELDS
+    ):
+        if role != "NET_N":
+            reasons.append("Le bilan actif courant exige column_role=NET_N.")
 
-    if section == "BILAN_PASSIF" and candidate.period == "N" and field_code in _PASSIF_CURRENT_FIELDS:
-        if "precedent" in column:
-            reasons.append("La colonne Exercice précédent est interdite.")
+    if (
+        section == "BILAN_PASSIF"
+        and candidate.period == "N"
+        and field_code in _PASSIF_CURRENT_FIELDS
+    ):
+        if role != "EXERCICE_N":
+            reasons.append("Le bilan passif courant exige column_role=EXERCICE_N.")
 
-    if section == "CPC" and candidate.period == "N" and field_code in _CPC_CURRENT_FIELDS:
-        valid_total_column = any(
-            token in column
-            for token in ("total", "totaux", "3 1 2", "3=1+2", "3 = 1 + 2")
-        )
-        if not valid_total_column and column != "exercice":
-            reasons.append("Le CPC courant exige la colonne Totaux de l'exercice.")
+    if (
+        section == "CPC"
+        and candidate.period == "N"
+        and field_code in _CPC_CURRENT_FIELDS
+    ):
+        if role != "TOTAL_EXERCICE_N":
+            reasons.append("Le CPC courant exige column_role=TOTAL_EXERCICE_N.")
 
-    if field_code in {"TOTAL_PASSIF", "TOTAL_ACTIF"}:
-        if not _is_total_general_label(label):
+    if field_code in {"RESULTAT_NET_XIII", "RESULTAT_NET_XVI"}:
+        if section != "CPC":
+            reasons.append("RESULTAT_NET XIII/XVI hors CPC.")
+        if role != "TOTAL_EXERCICE_N":
+            reasons.append("RESULTAT_NET XIII/XVI exige column_role=TOTAL_EXERCICE_N.")
+        if candidate.period != "N":
+            reasons.append("RESULTAT_NET XIII/XVI exige period=N.")
+
+    if field_code in {"TOTAL_PASSIF", "TOTAL_ACTIF", "TOTAL_BILAN"}:
+        if not is_total_general_candidate(candidate):
             reasons.append(
                 "Un total intermédiaire ne peut pas devenir le total général."
             )
@@ -284,7 +361,14 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
     if field_code == "DETTES_FINANCIERES":
         if section != "BILAN_PASSIF":
             reasons.append("DETTES_FINANCIERES hors BILAN_PASSIF.")
-        if any(token in label for token in ("augmentation des dettes", "diminution des dettes", "ecart de conversion")):
+        if any(
+            token in label
+            for token in (
+                "augmentation des dettes",
+                "diminution des dettes",
+                "ecart de conversion",
+            )
+        ):
             reasons.append("Ligne d'écart de conversion exclue.")
 
     if field_code in {"RESULTAT_NET", "RESULTAT_NET_XIII", "RESULTAT_NET_XVI"}:
@@ -297,27 +381,31 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
         if section != "CPC":
             reasons.append("CHARGES_INTERETS hors CPC.")
         if "autres charges financieres" in label:
-            reasons.append("Autres charges financières non assimilées automatiquement aux charges d'intérêts.")
+            reasons.append(
+                "Autres charges financières non assimilées automatiquement "
+                "aux charges d'intérêts."
+            )
 
     if field_code == "CHIFFRE_AFFAIRES":
         if section != "CPC":
             reasons.append("CHIFFRE_AFFAIRES hors CPC.")
-        if section == "DETAIL_CPC":
-            reasons.append("CHIFFRE_AFFAIRES refusé depuis DETAIL_CPC.")
 
     if field_code == "ENCOURS_LEASING" and "redevance" in label:
         reasons.append("Une redevance de crédit-bail n'est pas un encours.")
 
-    if field_code == "REDEVANCES_CREDIT_BAIL" and "encours" in label and "redevance" not in label:
+    if (
+        field_code == "REDEVANCES_CREDIT_BAIL"
+        and "encours" in label
+        and "redevance" not in label
+    ):
         reasons.append("Encours exclu du champ REDEVANCES_CREDIT_BAIL.")
 
     return not reasons, reasons
 
-
 def candidate_priority(candidate: FinancialCandidate) -> float:
     score = float(_NATURE_PRIORITY.get(candidate.nature, 0))
     score += float(candidate.confidence) * 20.0
-    column = _fold(candidate.evidence.column_name or "")
+    role = candidate.evidence.column_role
     label = _fold(candidate.evidence.raw_label)
     section = candidate.evidence.section
     field_code = str(candidate.field_code)
@@ -340,32 +428,21 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
         "RESULTAT_NET_XIII": {"CPC"},
         "RESULTAT_NET_XVI": {"CPC"},
         "CHARGES_INTERETS": {"CPC"},
-        "ACHATS_REVENDUS": {"CPC", "DETAIL_CPC"},
-        "ACHATS_CONSOMMES": {"CPC", "DETAIL_CPC"},
         "REDEVANCES_CREDIT_BAIL": {"DETAIL_CPC", "CPC"},
     }
     expected = expected_sections.get(field_code)
     if expected and section in expected:
         score += 100.0
 
-    if candidate.period == "N" and not field_code.endswith("_N1"):
+    if candidate.period == "N":
         score += 80.0
-    if candidate.period == "N_MINUS_1" and field_code.endswith("_N1"):
+    if candidate.period == "N_MINUS_1":
         score += 80.0
 
-    if section == "BILAN_ACTIF":
-        if candidate.period == "N" and "net" in column and "precedent" not in column:
-            score += 60.0
-        if candidate.period == "N_MINUS_1" and ("precedent" in column or "n 1" in column or "n1" in column):
-            score += 60.0
-
-    if section == "BILAN_PASSIF":
-        if candidate.period == "N" and "exercice" in column and "precedent" not in column:
-            score += 60.0
-
-    if section == "CPC" and candidate.period == "N":
-        if any(token in column for token in ("totaux", "total", "3 1 2", "3 = 1 + 2", "3=1+2")):
-            score += 60.0
+    if role in {"NET_N", "EXERCICE_N", "TOTAL_EXERCICE_N"} and candidate.period == "N":
+        score += 60.0
+    if role == "EXERCICE_N1" and candidate.period == "N_MINUS_1":
+        score += 60.0
 
     exact_hints = {
         "CLIENTS": ("clients et comptes rattaches",),
@@ -400,34 +477,50 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
     return score
 
 
+def sanitize_candidate(candidate: FinancialCandidate) -> FinancialCandidate:
+    """Nettoie les marqueurs techniques /think sans modifier le métier."""
+    raw = clean_qwen_marker(candidate.raw_value)
+    evidence = candidate.evidence.model_copy(
+        update={
+            "raw_value": clean_qwen_marker(candidate.evidence.raw_value),
+            "source_excerpt": clean_qwen_marker(candidate.evidence.source_excerpt),
+        }
+    )
+    return candidate.model_copy(update={"raw_value": raw, "evidence": evidence})
+
+
 def group_candidates_by_field(outputs: list[FinancialMappingOutput]) -> dict[str, list[FinancialCandidate]]:
     grouped: dict[str, list[FinancialCandidate]] = defaultdict(list)
     for output in outputs:
         for candidate in output.candidates:
+            candidate = sanitize_candidate(candidate)
             candidate = infer_period_from_column(candidate)
-            candidate = canonicalize_candidate_period(candidate)
             if candidate.field_code == "UNKNOWN":
                 continue
-            if str(candidate.field_code) == "RESULTAT_NET" and candidate.evidence.section == "CPC":
+            key = dataset_field_code(candidate)
+            if key == "RESULTAT_NET" and candidate.evidence.section == "CPC":
                 label = _fold(candidate.evidence.raw_label)
                 if "xiii" in label:
-                    candidate = candidate.model_copy(update={"field_code": "RESULTAT_NET_XIII"})
+                    key = "RESULTAT_NET_XIII"
                 elif "xvi" in label:
-                    candidate = candidate.model_copy(update={"field_code": "RESULTAT_NET_XVI"})
-            grouped[str(candidate.field_code)].append(candidate)
+                    key = "RESULTAT_NET_XVI"
+            grouped[key].append(candidate)
     return grouped
 
 
 def _parse_candidate_amount(candidate: FinancialCandidate) -> tuple[Decimal | None, list[str]]:
-    raw = candidate.raw_value
-    if raw is None or str(raw).strip() == "":
+    raw = clean_qwen_marker(candidate.raw_value)
+    if not raw or not str(raw).strip():
         return None, ["raw_value absent — non converti en zéro."]
+    warnings: list[str] = []
+    if is_mixed_comma_ocr_amount(raw):
+        warnings.append("Separateurs OCR normalises.")
     amount = parse_decimal_amount(raw)
     if amount is None:
         if is_explicit_zero(raw):
-            return Decimal("0"), []
+            return Decimal("0"), warnings
         return None, [f"Montant non parsable : {raw!r}"]
-    return amount, []
+    return amount, warnings
 
 
 def _to_provenance(candidate: FinancialCandidate) -> ValueProvenance:
@@ -468,8 +561,8 @@ def _amounts_agree(a: Decimal, b: Decimal) -> bool:
     return abs(a - b) <= max(_AMOUNT_TOLERANCE, abs(a) * Decimal("0.0001"))
 
 
-def _eligible_sorted(candidates: list[FinancialCandidate]) -> list[tuple[FinancialCandidate, Decimal]]:
-    prepared: list[tuple[FinancialCandidate, Decimal, float]] = []
+def _eligible_sorted(candidates: list[FinancialCandidate]) -> list[tuple[FinancialCandidate, Decimal, list[str]]]:
+    prepared: list[tuple[FinancialCandidate, Decimal, float, list[str]]] = []
     for candidate in candidates:
         ok, reasons = candidate_is_eligible(candidate)
         if not ok:
@@ -479,29 +572,38 @@ def _eligible_sorted(candidates: list[FinancialCandidate]) -> list[tuple[Financi
         if amount is None:
             logger.warning("Candidate %s invalid: %s", candidate.field_code, "; ".join(parse_warnings))
             continue
-        prepared.append((candidate, amount, candidate_priority(candidate)))
+        prepared.append((candidate, amount, candidate_priority(candidate), parse_warnings))
     prepared.sort(key=lambda item: item[2], reverse=True)
-    return [(c, a) for c, a, _ in prepared]
+    return [(c, a, w) for c, a, _, w in prepared]
 
 
 def _has_suspected_row_shift(candidate: FinancialCandidate) -> bool:
     return any("suspected_row_shift" in w for w in candidate.warnings)
 
 
-def _pick_best(candidates: list[FinancialCandidate]) -> FinancialValue | None:
+def _pick_best(candidates: list[FinancialCandidate], *, code: str | None = None) -> FinancialValue | None:
     ranked = _eligible_sorted(candidates)
     if not ranked:
         return None
 
-    best_candidate, best_amount = ranked[0]
-    code = str(best_candidate.field_code)
+    best_candidate, best_amount, parse_warnings = ranked[0]
+    resolved_code = code or dataset_field_code(best_candidate)
+    if (
+        str(best_candidate.field_code) == "RESULTAT_NET"
+        and best_candidate.evidence.section == "CPC"
+    ):
+        label = _fold(best_candidate.evidence.raw_label)
+        if "xiii" in label:
+            resolved_code = "RESULTAT_NET_XIII"
+        elif "xvi" in label:
+            resolved_code = "RESULTAT_NET_XVI"
 
     if (
-        code in {"CLIENTS", "FOURNISSEURS", "STOCKS"}
+        resolved_code in {"CLIENTS", "FOURNISSEURS", "STOCKS"}
         and _has_suspected_row_shift(best_candidate)
     ):
         return _financial_value(
-            code,
+            resolved_code,
             None,
             "ambiguous",
             [_to_provenance(best_candidate)],
@@ -513,24 +615,24 @@ def _pick_best(candidates: list[FinancialCandidate]) -> FinancialValue | None:
 
     best_priority = candidate_priority(best_candidate)
     tied = [
-        (candidate, amount)
-        for candidate, amount in ranked
+        (candidate, amount, pw)
+        for candidate, amount, pw in ranked
         if abs(candidate_priority(candidate) - best_priority) <= _PRIORITY_TIE_MARGIN
     ]
-    tied_amounts = {amount for _, amount in tied}
+    tied_amounts = {amount for _, amount, _ in tied}
 
     if len(tied_amounts) > 1:
         return _financial_value(
-            code,
+            resolved_code,
             None,
             "conflicting",
-            [_to_provenance(candidate) for candidate, _ in tied],
+            [_to_provenance(candidate) for candidate, _, _ in tied],
             warnings=[
                 "Candidats Qwen de priorité équivalente avec montants divergents."
             ],
         )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(parse_warnings)
     if len(ranked) > 1:
         warnings.append(
             f"{len(ranked) - 1} candidat(s) Qwen de priorité inférieure conservé(s) uniquement dans l'audit."
@@ -538,7 +640,7 @@ def _pick_best(candidates: list[FinancialCandidate]) -> FinancialValue | None:
     if _has_suspected_row_shift(best_candidate):
         warnings.append("suspected_row_shift signalé par Qwen.")
     return _financial_value(
-        code,
+        resolved_code,
         best_amount,
         "confirmed",
         [_to_provenance(best_candidate)],
@@ -588,13 +690,23 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
     xiii = _eligible_sorted(grouped.get("RESULTAT_NET_XIII", []))
     xvi = _eligible_sorted(grouped.get("RESULTAT_NET_XVI", []))
     cpc = _eligible_sorted(grouped.get("RESULTAT_NET", []))
-    cpc = [(c, a) for c, a in cpc if c.evidence.section == "CPC" and c.period == "N"]
+    cpc = [
+        (c, a, w)
+        for c, a, w in cpc
+        if c.evidence.section == "CPC"
+        and c.period == "N"
+        and c.evidence.column_role == "TOTAL_EXERCICE_N"
+    ]
     bilan = _eligible_sorted(grouped.get("RESULTAT_NET", []))
-    bilan = [(c, a) for c, a in bilan if c.evidence.section == "BILAN_PASSIF" and c.period == "N"]
+    bilan = [
+        (c, a, w)
+        for c, a, w in bilan
+        if c.evidence.section == "BILAN_PASSIF" and c.period == "N"
+    ]
 
     if xiii and xvi:
-        c13, v13 = xiii[0]
-        c16, v16 = xvi[0]
+        c13, v13, w13 = xiii[0]
+        c16, v16, w16 = xvi[0]
         provenances = [_to_provenance(c13), _to_provenance(c16)]
         if _amounts_agree(v13, v16):
             if bilan and not _amounts_agree(v13, bilan[0][1]):
@@ -615,7 +727,7 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
         )
 
     if cpc:
-        best_c, best_a = cpc[0]
+        best_c, best_a, best_w = cpc[0]
         if bilan and not _amounts_agree(best_a, bilan[0][1]):
             return _financial_value(
                 "RESULTAT_NET",
@@ -627,7 +739,7 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
         return _financial_value("RESULTAT_NET", best_a, "confirmed", [_to_provenance(best_c)])
 
     if bilan:
-        c, a = bilan[0]
+        c, a, w = bilan[0]
         return _financial_value("RESULTAT_NET", a, "confirmed", [_to_provenance(c)])
     return None
 
@@ -650,7 +762,7 @@ def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) ->
         candidates = [c for c in candidates if "chiffre d affaires" in _fold(c.evidence.raw_label)] or candidates
     if code == "ENCOURS_LEASING" and not _eligible_sorted(candidates):
         return _financial_value("ENCOURS_LEASING", None, "missing", [])
-    return _pick_best(candidates)
+    return _pick_best(candidates, code=code)
 
 
 def _usable_fv(fv: FinancialValue | None) -> bool:
@@ -667,6 +779,7 @@ def _prefer_derived_when_ocr_conflicts(
     calculated: Decimal,
     components: list[FinancialValue],
     formula_warning: str,
+    conflict_warning: str | None = None,
 ) -> None:
     provenances: list[ValueProvenance] = []
     for component in components:
@@ -685,12 +798,12 @@ def _prefer_derived_when_ocr_conflicts(
             "derived",
             existing.provenance + provenances,
             warnings=[
-                (
+                conflict_warning
+                or (
                     f"{code} OCR ({existing.value}) contredit le calcul "
                     f"comptable ({calculated}). Valeur calculée retenue."
                 ),
                 formula_warning,
-                "Observation OCR conservée en provenance mais marquée conflicting.",
             ],
         )
         return
@@ -718,6 +831,9 @@ def _apply_accounting_derivations(resolved: dict[str, FinancialValue]) -> None:
             pf.value - cf.value,
             [pf, cf],
             "Dérivé : PRODUITS_FINANCIERS - CHARGES_FINANCIERES",
+            conflict_warning=(
+                "Résultat financier OCR contradictoire avec produits - charges."
+            ),
         )
 
     pnc = resolved.get("PRODUITS_NON_COURANTS")
@@ -764,7 +880,6 @@ def _apply_accounting_derivations(resolved: dict[str, FinancialValue]) -> None:
     if _usable_fv(ta) and _usable_fv(tp):
         assert ta is not None and tp is not None
         assert ta.value is not None and tp.value is not None
-        # Champ dataset séparément via _apply_simple_derived ; garder aussi code résolu.
         resolved.setdefault(
             "TRESORERIE_NETTE",
             _financial_value(
@@ -825,7 +940,7 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
     for code, candidates in grouped.items():
         if code in resolved or code in {"RESULTAT_NET_XIII", "RESULTAT_NET_XVI", "UNKNOWN"}:
             continue
-        fv = _pick_best(candidates)
+        fv = _pick_best(candidates, code=code)
         if fv is not None:
             resolved[code] = fv
 

@@ -38,6 +38,7 @@ def _ok_mapping_json(section: str = "CPC") -> str:
                         "raw_label": "Chiffre d'affaires",
                         "raw_value": "13 404 177,00",
                         "column_name": "Totaux de l'exercice",
+                        "column_role": "TOTAL_EXERCICE_N",
                         "source_excerpt": "| Chiffre d'affaires | 13 404 177,00 |",
                     },
                     "warnings": [],
@@ -98,7 +99,8 @@ def test_payload_uses_qwen_model_same_url_no_image_schema_format():
     assert payload["model"] == "qwen3:8b"
     assert payload["stream"] is False
     assert payload["options"]["temperature"] == 0
-    assert "think" not in payload
+    assert payload["think"] is False
+    assert "/no_think" in payload["messages"][1]["content"]
     assert payload["format"] != "json"
     assert isinstance(payload["format"], dict)
     assert (
