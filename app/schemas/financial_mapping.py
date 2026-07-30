@@ -22,6 +22,8 @@ FinancialFieldCode = Literal[
     "CHIFFRE_AFFAIRES",
     "CHIFFRE_AFFAIRES_N1",
     "RESULTAT_NET",
+    "RESULTAT_NET_XIII",
+    "RESULTAT_NET_XVI",
     "RESULTAT_NET_N1",
     "RESULTAT_EXPLOITATION",
     "RESULTAT_EXPLOITATION_N1",
@@ -133,10 +135,17 @@ class FinancialMappingBatchResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-class MappingAuditInfo(BaseModel):
-    """Métadonnées d'audit exposées par /pdf/analyze (sans raisonnement LLM)."""
+class FinancialMappingAudit(BaseModel):
+    """Audit du mapping Qwen exposé par /pdf/analyze."""
 
-    strategy: str
-    model: str | None = None
-    sections_processed: int = 0
+    strategy: str = "qwen_only"
+    model: str
+    sections_detected: int
+    sections_processed: int
+    sections_failed: int
+    candidates_total: int
+    candidates_by_field: dict[str, int] = Field(default_factory=dict)
+    resolved_fields: list[str] = Field(default_factory=list)
+    missing_fields: list[str] = Field(default_factory=list)
+    conflicting_fields: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

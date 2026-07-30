@@ -6,6 +6,9 @@ import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
+from fastapi.testclient import TestClient
+
+from main import app
 from app.schemas.financial_mapping import (
     FinancialCandidate,
     FinancialMappingBatchResult,
@@ -23,6 +26,8 @@ from app.services.financial_ratios import (
     calculate_financial_autonomy,
     calculate_financial_ratios,
 )
+
+client = TestClient(app)
 
 
 def _c(
@@ -447,18 +452,21 @@ def test_pipeline_llm_strategy_with_mocked_qwen():
         result = asyncio.run(
             analyze_extracted_pdf(
                 extraction,
-                mapping_strategy="llm",
                 scoring_mode="REVIEW",
             )
         )
 
     assert result.mapping is not None
-    assert result.mapping["strategy"] == "llm"
-    assert result.mapping["model"] == "qwen3:8b"
+    assert result.mapping.strategy == "qwen_only"
+    assert result.mapping.model == "qwen3:8b"
     assert result.dataset.chiffre_affaires.value == Decimal("13404177.00")
     assert result.dataset.encours_leasing.value is None
     assert result.dataset.redevances_credit_bail is not None
     assert result.dataset.redevances_credit_bail.value == Decimal("21729.13")
+    assert all(
+        prov.extraction_method == "qwen_mapping"
+        for prov in result.dataset.chiffre_affaires.provenance
+    )
 
 
 def test_bilan_conflict_blocks_strict_score():
@@ -520,7 +528,6 @@ def test_bilan_conflict_blocks_strict_score():
         result = asyncio.run(
             analyze_extracted_pdf(
                 extraction,
-                mapping_strategy="llm",
                 scoring_mode="STRICT",
             )
         )
@@ -528,3 +535,8 @@ def test_bilan_conflict_blocks_strict_score():
         c.status == "failed" and c.code == "bilan_equilibre"
         for c in result.accounting_checks
     )
+
+
+def test_pdf_analyze_endpoint_has_no_mapping_strategy_form():
+    schema = app.openapi()["paths"]["/api/v1/extraction/pdf/analyze"]["post"]
+    assert "mapping_strategy" not in str(schema)

@@ -120,7 +120,16 @@ def test_merge_markdown_regions_keeps_different_amounts():
 def test_vision_output_insufficient():
     assert _vision_output_is_insufficient("[PAGE VIDE]") is False
     assert _vision_output_is_insufficient("court") is True
-    long_enough = "\n".join([f"Ligne {i} avec du contenu suffisant" for i in range(6)])
+    long_enough = "\n".join(
+        [
+            "| Col1 | Col2 |",
+            "|---|---:|",
+            "| Ligne 0 avec du contenu suffisant | 1 |",
+            "| Ligne 1 avec du contenu suffisant | 2 |",
+            "| Ligne 2 avec du contenu suffisant | 3 |",
+            "| Ligne 3 avec du contenu suffisant | 4 |",
+        ]
+    )
     assert len(long_enough) >= 120
     assert _vision_output_is_insufficient(long_enough) is False
 

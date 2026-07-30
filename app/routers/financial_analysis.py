@@ -45,25 +45,16 @@ async def analyze_pdf_financial(
         description="JSON SectorBenchmarkInput (optionnel)",
     ),
     scoring_mode: str = Form("STRICT"),
-    mapping_strategy: str = Form(
-        "hybrid",
-        description="deterministic | llm | hybrid",
-    ),
 ) -> PdfFinancialAnalysisResponse:
-    """PDF → Markdown → mapping Qwen (optionnel) → ratios Decimal → décision.
+    """PDF → Markdown → qwen3:8b → résolution Python → ratios Decimal → décision.
 
+    Le mapping financier est réalisé exclusivement par qwen3:8b.
     Les calculs restent 100 % Python/Decimal. Qwen ne produit que des candidats.
     """
     if scoring_mode.upper() not in {"STRICT", "REVIEW"}:
         raise HTTPException(
             status_code=422,
             detail="scoring_mode doit être STRICT ou REVIEW.",
-        )
-    strategy = (mapping_strategy or "hybrid").lower().strip()
-    if strategy not in {"deterministic", "llm", "hybrid"}:
-        raise HTTPException(
-            status_code=422,
-            detail="mapping_strategy doit être deterministic, llm ou hybrid.",
         )
     if max_pages is not None and max_pages < 1:
         raise HTTPException(status_code=422, detail="max_pages doit être >= 1.")
@@ -109,6 +100,5 @@ async def analyze_pdf_financial(
         behavioral_input=behavioral,
         sector_input=sector,
         scoring_mode=scoring_mode.upper(),
-        mapping_strategy=strategy,
     )
     return PdfFinancialAnalysisResponse(extraction=extraction, analysis=analysis)

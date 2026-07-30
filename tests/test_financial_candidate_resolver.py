@@ -138,7 +138,7 @@ def test_period_n_required_for_current_fields():
     )
     ok, reasons = candidate_is_eligible(c)
     assert ok is False
-    assert any("période" in r.lower() or "periode" in r.lower() for r in reasons)
+    assert any("period=n" in r.lower() or "champ courant" in r.lower() for r in reasons)
 
 
 def test_bilan_actif_prefers_net_column():

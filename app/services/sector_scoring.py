@@ -12,20 +12,13 @@ def _compare_to_median(
     median: Decimal | None,
     *,
     higher_is_better: bool,
-) -> tuple[str | None, Decimal]:
-    """Retourne (comparison, points 0-20)."""
+) -> tuple[str | None, Decimal | None]:
     if value is None or median is None:
-        return None, Decimal("0")
-    above = value >= median
-    if higher_is_better:
-        return (
-            "above_median" if above else "below_median",
-            Decimal("20") if above else Decimal("8"),
-        )
-    return (
-        "below_median" if value <= median else "above_median",
-        Decimal("20") if value <= median else Decimal("8"),
-    )
+        return None, None
+    favorable = value >= median if higher_is_better else value <= median
+    comparison = "above_median" if value >= median else "below_median"
+    points = Decimal("20") if favorable else Decimal("0")
+    return comparison, points
 
 
 def calculate_sector_score(
@@ -45,9 +38,9 @@ def calculate_sector_score(
         )
 
     by_code = {r.code: r for r in ratios}
+    available_comparisons = 0
     points = Decimal("0")
     max_points = Decimal("0")
-    notes: list[str] = []
 
     comparisons = [
         (
@@ -78,18 +71,19 @@ def calculate_sector_score(
     ]
 
     for code, median, higher in comparisons:
-        max_points += Decimal("20")
         ratio = by_code.get(code)
-        comparison, pts = _compare_to_median(
+        comparison, comparison_points = _compare_to_median(
             ratio.value if ratio else None,
             median,
             higher_is_better=higher,
         )
-        points += pts
-        if comparison:
-            notes.append(f"{code}={comparison} (percentile=None)")
+        if comparison_points is None:
+            continue
+        available_comparisons += 1
+        points += comparison_points
+        max_points += Decimal("20")
 
-    if max_points == 0 or points == 0 and not notes:
+    if available_comparisons < 3:
         return AxisScore(
             code="sector",
             label="Positionnement sectoriel",
@@ -97,7 +91,7 @@ def calculate_sector_score(
             weight=weight,
             weighted_contribution=Decimal("0"),
             calculable=False,
-            blocking_reasons=["Médianes sectorielles insuffisantes."],
+            blocking_reasons=["Moins de trois comparaisons sectorielles disponibles."],
         )
 
     raw = (points / max_points * Decimal("100")).quantize(

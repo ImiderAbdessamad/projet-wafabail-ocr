@@ -36,24 +36,21 @@ def calculate_behavioral_score(
             f"Cotation BAM bloquante : {behavioral.bam_rating}."
         )
 
-    if (behavioral.payment_incidents_24m or 0) > 0:
+    if behavioral.payment_incidents_24m is not None and behavioral.payment_incidents_24m > 0:
         blocking.append("Incident(s) de paiement sur 24 mois.")
-    if (behavioral.unpaid_bills_24m or 0) > 0:
+    if behavioral.unpaid_bills_24m is not None and behavioral.unpaid_bills_24m > 0:
         blocking.append("Effet(s) impayé(s) sur 24 mois.")
-    if (behavioral.rejected_debits_24m or 0) > 0:
+    if behavioral.rejected_debits_24m is not None and behavioral.rejected_debits_24m > 0:
         blocking.append("Rejet(s) de prélèvement sur 24 mois.")
 
     points = Decimal("0")
     max_points = Decimal("0")
-
-    def add(score: Decimal, maximum: Decimal) -> None:
-        nonlocal points, max_points
-        points += score
-        max_points += maximum
+    covered_points = Decimal("0")
 
     # Domiciliation CA
     max_points += Decimal("20")
     if behavioral.ca_domiciliation_pct is not None:
+        covered_points += Decimal("20")
         if behavioral.ca_domiciliation_pct >= BEHAVIORAL_RULES["domiciliation_good"]:
             points += Decimal("20")
         elif behavioral.ca_domiciliation_pct >= Decimal("60"):
@@ -64,6 +61,7 @@ def calculate_behavioral_score(
     # Découvert
     max_points += Decimal("15")
     if behavioral.overdraft_usage_pct is not None:
+        covered_points += Decimal("15")
         if behavioral.overdraft_usage_pct <= BEHAVIORAL_RULES["overdraft_watch"]:
             points += Decimal("15")
         elif behavioral.overdraft_usage_pct <= Decimal("70"):
@@ -74,6 +72,7 @@ def calculate_behavioral_score(
     # Jours débiteurs
     max_points += Decimal("15")
     if behavioral.debit_position_days is not None:
+        covered_points += Decimal("15")
         if behavioral.debit_position_days <= BEHAVIORAL_RULES["debit_days_watch"]:
             points += Decimal("15")
         elif behavioral.debit_position_days <= 90:
@@ -84,6 +83,7 @@ def calculate_behavioral_score(
     # Écart flux / CA
     max_points += Decimal("15")
     if behavioral.bank_flows_vs_declared_ca_gap_pct is not None:
+        covered_points += Decimal("15")
         gap = abs(behavioral.bank_flows_vs_declared_ca_gap_pct)
         if gap <= BEHAVIORAL_RULES["flow_gap_watch"]:
             points += Decimal("15")
@@ -95,6 +95,7 @@ def calculate_behavioral_score(
     # Retards leasing
     max_points += Decimal("15")
     if behavioral.leasing_payment_delays_24m is not None:
+        covered_points += Decimal("15")
         if behavioral.leasing_payment_delays_24m == 0:
             points += Decimal("15")
         else:
@@ -103,12 +104,15 @@ def calculate_behavioral_score(
 
     # Incidents / rejets déjà bloquants : 0 point sur ce volet
     max_points += Decimal("20")
-    if (
-        (behavioral.payment_incidents_24m or 0) == 0
-        and (behavioral.rejected_debits_24m or 0) == 0
-        and (behavioral.unpaid_bills_24m or 0) == 0
-    ):
-        points += Decimal("20")
+    trio = (
+        behavioral.payment_incidents_24m,
+        behavioral.rejected_debits_24m,
+        behavioral.unpaid_bills_24m,
+    )
+    if all(value is not None for value in trio):
+        covered_points += Decimal("20")
+        if all(value == 0 for value in trio):
+            points += Decimal("20")
 
     provided = any(
         [
@@ -122,7 +126,13 @@ def calculate_behavioral_score(
         ]
     )
 
-    if not provided or max_points == 0:
+    coverage_ratio = (
+        (covered_points / max_points).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if max_points > 0
+        else Decimal("0")
+    )
+
+    if not provided or max_points == 0 or coverage_ratio < Decimal("0.70"):
         return (
             AxisScore(
                 code="behavioral",

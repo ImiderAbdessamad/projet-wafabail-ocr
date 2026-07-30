@@ -98,6 +98,7 @@ def test_payload_uses_qwen_model_same_url_no_image_schema_format():
     assert payload["model"] == "qwen3:8b"
     assert payload["stream"] is False
     assert payload["options"]["temperature"] == 0
+    assert "think" not in payload
     assert payload["format"] != "json"
     assert isinstance(payload["format"], dict)
     assert (

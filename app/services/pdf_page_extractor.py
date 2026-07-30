@@ -156,38 +156,48 @@ def _normalize_merge_line(line: str) -> str:
     return " ".join(line.strip().lower().split())
 
 
+def _merge_two_region_markdowns(
+    top: str,
+    bottom: str,
+    *,
+    max_overlap_lines: int = 30,
+) -> str:
+    top_lines = top.strip().splitlines()
+    bottom_lines = bottom.strip().splitlines()
+
+    max_size = min(max_overlap_lines, len(top_lines), len(bottom_lines))
+    overlap_size = 0
+
+    for size in range(max_size, 0, -1):
+        top_suffix = [_normalize_merge_line(line) for line in top_lines[-size:]]
+        bottom_prefix = [_normalize_merge_line(line) for line in bottom_lines[:size]]
+        if top_suffix == bottom_prefix:
+            overlap_size = size
+            break
+
+    merged = top_lines + bottom_lines[overlap_size:]
+    return "\n".join(merged).strip()
+
+
 def _merge_markdown_regions(region_contents: list[str]) -> str:
-    """Fusionne plusieurs transcriptions Markdown en supprimant les doublons."""
-    merged_lines: list[str] = []
-    seen_recent: list[str] = []
+    """Fusionne seulement les chevauchements exacts top/bottom."""
+    if not region_contents:
+        return ""
+    merged = region_contents[0].strip()
+    for content in region_contents[1:]:
+        merged = _merge_two_region_markdowns(merged, content)
+    return merged.strip()
 
-    for content in region_contents:
-        if not content:
-            continue
 
-        lines = content.strip().splitlines()
-
-        for line in lines:
-            normalized = _normalize_merge_line(line)
-
-            if not normalized:
-                if merged_lines and merged_lines[-1] != "":
-                    merged_lines.append("")
-                continue
-
-            if normalized in seen_recent:
-                continue
-
-            merged_lines.append(line.rstrip())
-
-            seen_recent.append(normalized)
-            if len(seen_recent) > 40:
-                seen_recent.pop(0)
-
-    while merged_lines and not merged_lines[-1]:
-        merged_lines.pop()
-
-    return "\n".join(merged_lines).strip()
+def _markdown_table_quality(markdown: str) -> float:
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    table_lines = [line for line in lines if line.startswith("|") and line.endswith("|")]
+    if not table_lines:
+        return 0.5 if len(lines) >= 4 else 0.0
+    column_counts = [max(line.count("|") - 1, 0) for line in table_lines]
+    dominant_count = max(set(column_counts), key=column_counts.count)
+    consistent_lines = sum(1 for count in column_counts if count == dominant_count)
+    return consistent_lines / max(len(column_counts), 1)
 
 
 def _vision_output_is_insufficient(markdown: str) -> bool:
@@ -205,6 +215,9 @@ def _vision_output_is_insufficient(markdown: str) -> bool:
     if len(lines) < 4:
         return True
 
+    if _markdown_table_quality(content) < 0.70:
+        return True
+
     return False
 
 
@@ -217,11 +230,13 @@ def _vision_page_result(
     extraction_strategy: str = "full_page",
 ) -> PdfPageExtraction:
     is_empty = markdown_content.strip() == "[PAGE VIDE]"
+    table_quality = _markdown_table_quality(markdown_content) if not is_empty else 0.0
     meta: dict = {
         "output_format": "markdown",
         "layout_preserved": True,
         "table_format": "markdown",
         "extraction_strategy": extraction_strategy,
+        "markdown_table_quality": table_quality,
     }
     if is_empty:
         meta["page_empty"] = True

@@ -6,6 +6,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.financial_mapping import FinancialMappingAudit
+
 
 DataStatus = Literal[
     "confirmed",
@@ -233,4 +235,4 @@ class FinancialAnalysisResult(BaseModel):
     decision: CreditDecision
     warnings: list[str] = Field(default_factory=list)
     scoring_mode: str = "STRICT"
-    mapping: dict | None = None
+    mapping: FinancialMappingAudit | None = None

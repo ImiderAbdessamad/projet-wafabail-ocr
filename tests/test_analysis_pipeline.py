@@ -1,66 +1,26 @@
 # -*- coding: utf-8 -*-
-"""Tests pipeline d'analyse (sans Ollama)."""
+"""Tests pipeline d'analyse Qwen-only (sans Ollama)."""
 import asyncio
+import inspect
 from decimal import Decimal
+from unittest.mock import AsyncMock, patch
 
 from app.schemas.financial_analysis import BehavioralInput, SectorBenchmarkInput
+from app.schemas.financial_mapping import FinancialMappingBatchResult, FinancialMappingOutput
 from app.schemas.pdf_extraction import PdfContentExtractionResult, PdfPageExtraction
 from app.services.analysis_pipeline import analyze_extracted_pdf
-from app.services.markdown_financial_parser import parse_markdown_pages
+from app.services.financial_ratios import (
+    calculate_commercial_profitability,
+    calculate_debt_ratio,
+    calculate_financial_autonomy,
+)
 from app.services.sector_scoring import calculate_sector_score
-from app.services.financial_ratios import calculate_commercial_profitability
+from tests.test_financial_mapping_integration import serdilab_mapping_outputs
 from tests.test_financial_ratios import reference_dataset
 
 
-SAMPLE_MD = """
-# BILAN - ACTIF
-
-| Éléments | Brut | Amortissements | Net | Exercice précédent |
-|---|---:|---:|---:|---:|
-| Total général (I + II + III) | | | 24 800,00 | 23 000,00 |
-| Total I Actif immobilisé | | | 10 000,00 | |
-| Total II Actif circulant | | | 14 000,00 | |
-| Clients et comptes rattachés | | | 8 340,00 | |
-| Total III Trésorerie-Actif | | | 800,00 | |
-
-# BILAN - PASSIF
-
-| Éléments | Net |
-|---|---:|
-| Total des capitaux propres | 6 200,00 |
-| Dettes de financement | 11 400,00 |
-| Fournisseurs et comptes rattachés | 5 600,00 |
-| Total III Trésorerie-Passif | 300,00 |
-
-# CPC
-
-| Libellé | Total de l'exercice |
-|---|---:|
-| Chiffre d'affaires | 38 500,00 |
-| Achats consommés de matières et fournitures | 31 500,00 |
-| Charges d'intérêts | 900,00 |
-| Dotations d'exploitation | 1 700,00 |
-| Résultat net de l'exercice | 1 480,00 |
-"""
-
-
-def test_parse_markdown_tables():
-    pages = [
-        PdfPageExtraction(
-            page_number=1,
-            status="ok",
-            extraction_mode="vision",
-            content=SAMPLE_MD,
-            char_count=len(SAMPLE_MD),
-        )
-    ]
-    rows = parse_markdown_pages(pages)
-    assert len(rows) >= 5
-    assert any("chiffre" in r.normalized_label for r in rows)
-
-
-def test_analyze_pipeline_blocks_without_behavioral():
-    extraction = PdfContentExtractionResult(
+def _sample_extraction() -> PdfContentExtractionResult:
+    return PdfContentExtractionResult(
         source_filename="sample.pdf",
         pages_total=1,
         pages_processed=1,
@@ -73,25 +33,41 @@ def test_analyze_pipeline_blocks_without_behavioral():
             PdfPageExtraction(
                 page_number=1,
                 status="ok",
-                content=SAMPLE_MD,
-                char_count=len(SAMPLE_MD),
+                content="# COMPTE DE PRODUITS ET CHARGES\n| x | 1 |",
+                char_count=40,
             )
         ],
     )
-    result = asyncio.run(
-        analyze_extracted_pdf(
-            extraction,
-            scoring_mode="STRICT",
-            mapping_strategy="deterministic",
-        )
+
+
+def test_analysis_pipeline_no_longer_imports_deterministic_parser():
+    source = inspect.getsource(__import__("app.services.analysis_pipeline", fromlist=["*"]))
+    assert "parse_markdown_pages" not in source
+    assert "build_financial_dataset(" not in source
+    assert "merge_resolved_values" not in source
+
+
+def test_analyze_pipeline_blocks_without_behavioral():
+    extraction = _sample_extraction()
+    batch = FinancialMappingBatchResult(
+        model="qwen3:8b",
+        mapped_sections=serdilab_mapping_outputs(),
+        warnings=[],
     )
+    with patch("app.services.analysis_pipeline.map_financial_sections", new=AsyncMock(return_value=batch)):
+        result = asyncio.run(analyze_extracted_pdf(extraction, scoring_mode="STRICT"))
     assert result.decision.risk_class == "NON_EVALUABLE"
     assert result.final_score is None
     assert any(isinstance(r.value, Decimal) or r.value is None for r in result.ratios)
 
 
 def test_sector_no_invented_percentile():
-    ratios = [calculate_commercial_profitability(reference_dataset())]
+    dataset = reference_dataset()
+    ratios = [
+        calculate_commercial_profitability(dataset),
+        calculate_financial_autonomy(dataset),
+        calculate_debt_ratio(dataset),
+    ]
     axis = calculate_sector_score(
         ratios,
         SectorBenchmarkInput(
@@ -109,24 +85,7 @@ def test_sector_no_invented_percentile():
 
 
 def test_full_axes_with_inputs_can_score():
-    extraction = PdfContentExtractionResult(
-        source_filename="sample.pdf",
-        pages_total=1,
-        pages_processed=1,
-        pages_ok=1,
-        pages_failed=0,
-        model="test",
-        ollama_url="http://localhost",
-        processing_time_ms=1,
-        pages=[
-            PdfPageExtraction(
-                page_number=1,
-                status="ok",
-                content=SAMPLE_MD,
-                char_count=len(SAMPLE_MD),
-            )
-        ],
-    )
+    extraction = _sample_extraction()
     behavioral = BehavioralInput(
         ca_domiciliation_pct=Decimal("96"),
         debit_position_days=41,
@@ -146,15 +105,34 @@ def test_full_axes_with_inputs_can_score():
         repayment_capacity_median=Decimal("3"),
         ca_growth_median=Decimal("5"),
     )
-    result = asyncio.run(
-        analyze_extracted_pdf(
-            extraction,
-            behavioral_input=behavioral,
-            sector_input=sector,
-            scoring_mode="STRICT",
-            mapping_strategy="deterministic",
-        )
+    batch = FinancialMappingBatchResult(
+        model="qwen3:8b",
+        mapped_sections=serdilab_mapping_outputs(),
+        warnings=[],
     )
-    # CAF peut manquer dans le markdown → scoring strict peut bloquer
+    with patch("app.services.analysis_pipeline.map_financial_sections", new=AsyncMock(return_value=batch)):
+        result = asyncio.run(
+            analyze_extracted_pdf(
+                extraction,
+                behavioral_input=behavioral,
+                sector_input=sector,
+                scoring_mode="STRICT",
+            )
+        )
     assert result.decision is not None
     assert all(isinstance(a.raw_score, Decimal) for a in result.axes)
+
+
+def test_qwen_failure_leaves_fields_missing_without_fallback():
+    extraction = _sample_extraction()
+    batch = FinancialMappingBatchResult(
+        model="qwen3:8b",
+        mapped_sections=[FinancialMappingOutput(section="CPC", candidates=[])],
+        warnings=["Mapping Qwen indisponible : page=1, section=CPC, erreur=timeout"],
+    )
+    with patch("app.services.analysis_pipeline.map_financial_sections", new=AsyncMock(return_value=batch)):
+        result = asyncio.run(analyze_extracted_pdf(extraction, scoring_mode="STRICT"))
+    assert result.dataset.chiffre_affaires.value is None
+    assert result.dataset.chiffre_affaires.status == "missing"
+    assert result.mapping.strategy == "qwen_only"
+    assert "deterministic_parser" not in str(result.model_dump())
