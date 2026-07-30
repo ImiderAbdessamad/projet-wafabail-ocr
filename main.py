@@ -32,7 +32,7 @@ from app.config import (
     OLLAMA_VISION_MODEL,
     STATIC_DIR,
 )
-from app.routers import cin, export, extraction, financial_analysis, ice, scoring
+from app.routers import cin, export, extraction, financial_analysis, financial_documents, ice, scoring
 from app.services.glm_extractor import warmup_model as warmup_vision_model
 from app.services.ice_extractor import warmup_model as warmup_text_model
 
@@ -65,6 +65,7 @@ app.include_router(extraction.router, prefix="/api/v1")
 app.include_router(financial_analysis.router, prefix="/api/v1")
 app.include_router(scoring.router, prefix="/api/v1")
 app.include_router(export.router, prefix="/api/v1")
+app.include_router(financial_documents.router, prefix="/api/v1")
 
 
 @app.on_event("startup")
@@ -109,6 +110,11 @@ async def pdf_extract_page() -> FileResponse:
 @app.get("/liasse", tags=["Système"], include_in_schema=False)
 async def liasse_page() -> FileResponse:
     return FileResponse(STATIC_DIR / "liasse.html")
+
+
+@app.get("/financial-documents", tags=["Système"], include_in_schema=False)
+async def financial_documents_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "financial-documents.html")
 
 
 # Interface statique — montée en dernier pour ne pas masquer les routes API.

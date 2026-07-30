@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Analyse de liasse fiscale — GLM Vision</title>
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <link rel="stylesheet" href="/style.css?v=20260730fd" />
+  <link rel="stylesheet" href="/financial-documents.css?v=20260730fd" />
+</head>
+<body>
+  <div class="page">
+    <nav class="tool-switch" aria-label="Navigation des outils">
+      <a href="/" class="tool-switch-link">Extraction CIN</a>
+      <a href="/ice" class="tool-switch-link">Extraction ICE</a>
+      <a href="/liasse" class="tool-switch-link">Liasse &amp; Scoring</a>
+      <a href="/pdf" class="tool-switch-link">PDF / Bilans</a>
+      <a href="/financial-documents" class="tool-switch-link active">Liasse GLM direct</a>
+    </nav>
+
+    <header class="header">
+      <div class="header-badge" id="ollamaBadge">
+        <span class="dot" id="ollamaDot"></span>
+        <span id="ollamaLabel">Ollama · vérification…</span>
+      </div>
+      <h1>Analyse de liasse fiscale</h1>
+      <p class="subtitle">
+        Extraction directe GLM Vision et contrôles comptables Decimal —
+        sans mapping Qwen.
+      </p>
+    </header>
+
+    <main class="layout fd-layout">
+      <section class="card upload-card">
+        <div
+          id="dropzone"
+          class="dropzone"
+          tabindex="0"
+          role="button"
+          aria-label="Déposer un PDF de liasse fiscale"
+        >
+          <input type="file" id="fileInput" accept="application/pdf" hidden />
+          <button type="button" class="remove-btn" id="removeFile" hidden aria-label="Retirer le fichier">&times;</button>
+
+          <div id="dropzoneEmpty" class="dropzone-empty">
+            <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M4 16.5V18a2 2 0 002 2h12a2 2 0 002-2v-1.5M7 9l5-5 5 5M12 4v12" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <p class="dropzone-title">Glissez un PDF ici</p>
+            <p class="dropzone-hint">Liasse fiscale · max <span id="maxSizeLabel">50</span> Mo</p>
+            <button type="button" class="btn btn-ghost" id="browseBtn">Parcourir</button>
+          </div>
+
+          <div id="previewFile" class="preview-file" hidden>
+            <svg class="preview-file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+              <path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8l-5-5z" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 3v5h5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span id="previewFileName" class="preview-file-name"></span>
+            <span id="previewFileSize" class="preview-file-size"></span>
+          </div>
+        </div>
+
+        <div class="fd-actions">
+          <button type="button" class="btn btn-primary" id="analyzeBtn" disabled>
+            Lancer l'analyse
+          </button>
+          <button type="button" class="btn btn-ghost" id="resetBtn" hidden>
+            Réessayer
+          </button>
+        </div>
+
+        <p id="uploadError" class="fd-error" role="alert" hidden></p>
+      </section>
+
+      <section class="card fd-progress-card" id="progressCard" hidden aria-live="polite">
+        <h2 class="fd-section-title">Progression</h2>
+        <div class="fd-progress-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progressBar">
+          <div class="fd-progress-fill" id="progressFill"></div>
+        </div>
+        <p class="fd-progress-message" id="progressMessage">En attente…</p>
+        <dl class="fd-progress-meta">
+          <div><dt>Étape</dt><dd id="progressStep">—</dd></div>
+          <div><dt>Page</dt><dd id="progressPage">—</dd></div>
+          <div><dt>Financières</dt><dd id="progressFinancial">0</dd></div>
+          <div><dt>Ignorées</dt><dd id="progressSkipped">0</dd></div>
+          <div><dt>Échouées</dt><dd id="progressFailed">0</dd></div>
+        </dl>
+        <ol class="fd-steps" id="stepsList" aria-label="Étapes du pipeline">
+          <li data-step="validating">Validation PDF</li>
+          <li data-step="rendering">Rendu des pages</li>
+          <li data-step="classifying">Orientation / Classification</li>
+          <li data-step="extracting_page">Extraction GLM</li>
+          <li data-step="resolving">Résolution</li>
+          <li data-step="controls">Contrôles</li>
+          <li data-step="ratios">Ratios</li>
+          <li data-step="completed">Résultat</li>
+        </ol>
+      </section>
+
+      <section class="card fd-summary-card" id="summaryCard" hidden>
+        <h2 class="fd-section-title">Synthèse</h2>
+        <div class="fd-kpi-grid" id="kpiGrid"></div>
+      </section>
+
+      <section class="card fd-results-card" id="resultsCard" hidden>
+        <div class="fd-tabs" role="tablist" aria-label="Résultats">
+          <button type="button" class="fd-tab active" role="tab" data-tab="fields" aria-selected="true">Données</button>
+          <button type="button" class="fd-tab" role="tab" data-tab="controls" aria-selected="false">Contrôles</button>
+          <button type="button" class="fd-tab" role="tab" data-tab="ratios" aria-selected="false">Ratios</button>
+          <button type="button" class="fd-tab" role="tab" data-tab="pages" aria-selected="false">Pages</button>
+          <button type="button" class="fd-tab" role="tab" data-tab="audit" aria-selected="false">Audit</button>
+          <button type="button" class="fd-tab" role="tab" data-tab="json" aria-selected="false">JSON</button>
+        </div>
+
+        <div class="fd-tab-panels">
+          <div class="fd-panel active" id="panel-fields" role="tabpanel">
+            <div class="fd-table-wrap">
+              <table class="fd-table" id="fieldsTable">
+                <thead>
+                  <tr>
+                    <th>Champ</th>
+                    <th>Valeur N</th>
+                    <th>Valeur N-1</th>
+                    <th>Statut</th>
+                    <th>Page</th>
+                    <th>Confiance</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <aside class="fd-detail" id="fieldDetail" hidden aria-live="polite"></aside>
+          </div>
+
+          <div class="fd-panel" id="panel-controls" role="tabpanel" hidden>
+            <div id="controlsList" class="fd-checks"></div>
+          </div>
+
+          <div class="fd-panel" id="panel-ratios" role="tabpanel" hidden>
+            <div id="ratiosList" class="fd-checks"></div>
+          </div>
+
+          <div class="fd-panel" id="panel-pages" role="tabpanel" hidden>
+            <div id="pagesGrid" class="fd-pages-grid"></div>
+          </div>
+
+          <div class="fd-panel" id="panel-audit" role="tabpanel" hidden>
+            <ul id="auditList" class="fd-audit-list"></ul>
+          </div>
+
+          <div class="fd-panel" id="panel-json" role="tabpanel" hidden>
+            <div class="fd-json-actions">
+              <button type="button" class="btn btn-ghost btn-small" id="copyJsonBtn">Copier</button>
+              <button type="button" class="btn btn-ghost btn-small" id="downloadJsonBtn">Télécharger</button>
+            </div>
+            <pre id="jsonOutput" class="fd-json" tabindex="0"></pre>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/financial-documents.js?v=20260730fd"></script>
+</body>
+</html>

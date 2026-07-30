@@ -45,11 +45,14 @@ class ValueProvenance(BaseModel):
     extraction_method: str = "markdown_ocr"
     confidence: Decimal | None = None
     source_excerpt: str | None = None
-    # Extensions rétrocompatibles (mapping Qwen)
+    # Extensions rétrocompatibles (mapping Qwen / GLM direct)
     section: str | None = None
     nature: str | None = None
     period: str | None = None
     mapping_model: str | None = None
+    page_type: str | None = None
+    orientation: int | None = None
+    column_role: str | None = None
 
 
 class FinancialValue(BaseModel):
