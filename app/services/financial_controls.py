@@ -64,20 +64,14 @@ def run_accounting_controls(
 ) -> list[AccountingControlResult]:
     checks: list[AccountingControlResult] = []
 
-    total_actif = dataset.total_actif.value if usable(dataset.total_actif) else (
-        dataset.total_bilan.value if usable(dataset.total_bilan) else None
-    )
-    total_passif = dataset.total_passif.value if usable(dataset.total_passif) else (
-        dataset.total_bilan.value if usable(dataset.total_bilan) else None
-    )
-    # Si un seul total_bilan : équilibre non testable sans actif/passif séparés
+    # 1. TOTAL ACTIF N = TOTAL PASSIF N
     if usable(dataset.total_actif) and usable(dataset.total_passif):
         checks.append(
             _check(
                 "bilan_equilibre",
                 dataset.total_actif.value if dataset.total_actif else None,
                 dataset.total_passif.value if dataset.total_passif else None,
-                ["TOTAL_ACTIF", "TOTAL_PASSIF"],
+                ["TOTAL_ACTIF", "TOTAL_PASSIF", "TOTAL_BILAN"],
                 "Actif ≈ Passif.",
                 "Déséquilibre actif / passif au-delà de la tolérance.",
             )
@@ -92,7 +86,7 @@ def run_accounting_controls(
             )
         )
 
-    # Trésorerie nette
+    # 12. Trésorerie nette = actif - passif
     if usable(dataset.tresorerie_actif) and usable(dataset.tresorerie_passif):
         expected_tn = dataset.tresorerie_actif.value - dataset.tresorerie_passif.value  # type: ignore[operator]
         observed_tn = (
@@ -109,8 +103,123 @@ def run_accounting_controls(
                     "Trésorerie nette incohérente avec actif - passif.",
                 )
             )
+        elif dataset.tresorerie_nette.status == "missing":
+            # Dérivation laissée au builder ; contrôle informatif si absente
+            checks.append(
+                AccountingControlResult(
+                    code="tresorerie_nette",
+                    status="not_testable",
+                    expected=expected_tn,
+                    affected_fields=["TRESORERIE_ACTIF", "TRESORERIE_PASSIF"],
+                    message="Trésorerie nette non encore dérivée.",
+                )
+            )
 
-    # Résultat net ≈ résultat avant IS - IS (si dispo)
+    # 4. Produits exploitation - charges = résultat exploitation
+    if (
+        usable(dataset.produits_exploitation)
+        and usable(dataset.charges_exploitation)
+        and usable(dataset.resultat_exploitation)
+    ):
+        expected = (
+            dataset.produits_exploitation.value - dataset.charges_exploitation.value  # type: ignore[operator]
+        )
+        checks.append(
+            _check(
+                "resultat_exploitation",
+                expected,
+                dataset.resultat_exploitation.value,
+                ["PRODUITS_EXPLOITATION", "CHARGES_EXPLOITATION", "RESULTAT_EXPLOITATION"],
+                "Résultat d'exploitation cohérent.",
+                "Résultat d'exploitation incohérent.",
+            )
+        )
+
+    # 5. Produits financiers - charges financières = résultat financier
+    if (
+        usable(dataset.produits_financiers)
+        and usable(dataset.charges_financieres)
+        and usable(dataset.resultat_financier)
+    ):
+        expected = (
+            dataset.produits_financiers.value - dataset.charges_financieres.value  # type: ignore[operator]
+        )
+        checks.append(
+            _check(
+                "resultat_financier",
+                expected,
+                dataset.resultat_financier.value,
+                ["PRODUITS_FINANCIERS", "CHARGES_FINANCIERES", "RESULTAT_FINANCIER"],
+                "Résultat financier cohérent.",
+                "Résultat financier incohérent.",
+            )
+        )
+
+    # 6. Résultat exploitation + financier = courant
+    if (
+        usable(dataset.resultat_exploitation)
+        and usable(dataset.resultat_financier)
+        and usable(dataset.resultat_courant)
+    ):
+        expected = (
+            dataset.resultat_exploitation.value + dataset.resultat_financier.value  # type: ignore[operator]
+        )
+        checks.append(
+            _check(
+                "resultat_courant",
+                expected,
+                dataset.resultat_courant.value,
+                ["RESULTAT_EXPLOITATION", "RESULTAT_FINANCIER", "RESULTAT_COURANT"],
+                "Résultat courant cohérent.",
+                "Résultat courant incohérent.",
+            )
+        )
+
+    # 7. Produits NC - charges NC = résultat NC
+    if (
+        usable(dataset.produits_non_courants)
+        and usable(dataset.charges_non_courantes)
+        and usable(dataset.resultat_non_courant)
+    ):
+        expected = (
+            dataset.produits_non_courants.value - dataset.charges_non_courantes.value  # type: ignore[operator]
+        )
+        checks.append(
+            _check(
+                "resultat_non_courant",
+                expected,
+                dataset.resultat_non_courant.value,
+                [
+                    "PRODUITS_NON_COURANTS",
+                    "CHARGES_NON_COURANTES",
+                    "RESULTAT_NON_COURANT",
+                ],
+                "Résultat non courant cohérent.",
+                "Résultat non courant incohérent.",
+            )
+        )
+
+    # 8. Courant + non courant = avant impôt
+    if (
+        usable(dataset.resultat_courant)
+        and usable(dataset.resultat_non_courant)
+        and usable(dataset.resultat_avant_impot)
+    ):
+        expected = (
+            dataset.resultat_courant.value + dataset.resultat_non_courant.value  # type: ignore[operator]
+        )
+        checks.append(
+            _check(
+                "resultat_avant_impot",
+                expected,
+                dataset.resultat_avant_impot.value,
+                ["RESULTAT_COURANT", "RESULTAT_NON_COURANT", "RESULTAT_AVANT_IMPOT"],
+                "Résultat avant impôt cohérent.",
+                "Résultat avant impôt incohérent.",
+            )
+        )
+
+    # 9. Résultat avant IS - IS = résultat net
     if (
         usable(dataset.resultat_avant_impot)
         and usable(dataset.impot_sur_resultats)
@@ -124,7 +233,7 @@ def run_accounting_controls(
                 "resultat_net",
                 expected_rn,
                 dataset.resultat_net.value,
-                ["RESULTAT_AVANT_IMPOT", "IS", "RESULTAT_NET"],
+                ["RESULTAT_AVANT_IMPOT", "IMPOT_SUR_RESULTATS", "RESULTAT_NET"],
                 "Résultat net cohérent.",
                 "Résultat net incohérent avec résultat avant IS - IS.",
             )

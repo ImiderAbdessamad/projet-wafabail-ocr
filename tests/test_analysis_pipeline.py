@@ -78,7 +78,13 @@ def test_analyze_pipeline_blocks_without_behavioral():
             )
         ],
     )
-    result = asyncio.run(analyze_extracted_pdf(extraction, scoring_mode="STRICT"))
+    result = asyncio.run(
+        analyze_extracted_pdf(
+            extraction,
+            scoring_mode="STRICT",
+            mapping_strategy="deterministic",
+        )
+    )
     assert result.decision.risk_class == "NON_EVALUABLE"
     assert result.final_score is None
     assert any(isinstance(r.value, Decimal) or r.value is None for r in result.ratios)
@@ -146,6 +152,7 @@ def test_full_axes_with_inputs_can_score():
             behavioral_input=behavioral,
             sector_input=sector,
             scoring_mode="STRICT",
+            mapping_strategy="deterministic",
         )
     )
     # CAF peut manquer dans le markdown → scoring strict peut bloquer

@@ -51,5 +51,18 @@ OCR_SOFT_WARMUP = os.getenv("OCR_SOFT_WARMUP", "true").lower() in {"1", "true", 
 NATIVE_COMPLETENESS_THRESHOLD = float(os.getenv("NATIVE_COMPLETENESS_THRESHOLD", "15"))
 SCORING_MIN_COMPLETENESS_PCT = float(os.getenv("SCORING_MIN_COMPLETENESS_PCT", "50"))
 
+# --- Mapping financier Qwen (même OLLAMA_URL que GLM) ---------------------
+OLLAMA_MAPPING_MODEL = os.getenv("OLLAMA_MAPPING_MODEL", "qwen3:8b")
+OLLAMA_MAPPING_TIMEOUT_SECONDS = float(
+    os.getenv("OLLAMA_MAPPING_TIMEOUT_SECONDS", "300")
+)
+OLLAMA_MAPPING_NUM_CTX = int(os.getenv("OLLAMA_MAPPING_NUM_CTX", "32768"))
+OLLAMA_MAPPING_NUM_PREDICT = int(os.getenv("OLLAMA_MAPPING_NUM_PREDICT", "8192"))
+OLLAMA_MAPPING_KEEP_ALIVE = os.getenv("OLLAMA_MAPPING_KEEP_ALIVE", "5m")
+OLLAMA_MAPPING_MAX_ATTEMPTS = int(os.getenv("OLLAMA_MAPPING_MAX_ATTEMPTS", "3"))
+OLLAMA_MAPPING_MAX_SECTION_CHARS = int(
+    os.getenv("OLLAMA_MAPPING_MAX_SECTION_CHARS", "60000")
+)
+
 # --- Répertoires ----------------------------------------------------------
 STATIC_DIR = BASE_DIR / "static"

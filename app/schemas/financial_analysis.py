@@ -43,6 +43,11 @@ class ValueProvenance(BaseModel):
     extraction_method: str = "markdown_ocr"
     confidence: Decimal | None = None
     source_excerpt: str | None = None
+    # Extensions rétrocompatibles (mapping Qwen)
+    section: str | None = None
+    nature: str | None = None
+    period: str | None = None
+    mapping_model: str | None = None
 
 
 class FinancialValue(BaseModel):
@@ -118,6 +123,9 @@ class FinancialDataset(BaseModel):
     impot_sur_resultats: FinancialValue | None = None
     total_actif: FinancialValue | None = None
     total_passif: FinancialValue | None = None
+    achats_revendus: FinancialValue | None = None
+    achats_consommes: FinancialValue | None = None
+    redevances_credit_bail: FinancialValue | None = None
 
     warnings: list[str] = Field(default_factory=list)
 
@@ -225,3 +233,4 @@ class FinancialAnalysisResult(BaseModel):
     decision: CreditDecision
     warnings: list[str] = Field(default_factory=list)
     scoring_mode: str = "STRICT"
+    mapping: dict | None = None
