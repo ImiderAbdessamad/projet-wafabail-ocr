@@ -98,9 +98,58 @@ ALLOWED_FIELDS_BY_SECTION: dict[str, set[str]] = {
 }
 
 _TOTAL_GENERAL_RE = re.compile(
-    r"\btotal\s+(?:general\s+)?i\s*\+?\s*ii\s*\+?\s*iii\b",
+    (
+        r"\btotal\s+"
+        r"(?:general\s+)?"
+        r"i\s*(?:\+|\s)\s*ii\s*(?:\+|\s)\s*iii\b"
+    ),
     re.IGNORECASE,
 )
+
+SUPPORTED_PERIODS_BY_FIELD: dict[str, set[str]] = {
+    "CHIFFRE_AFFAIRES": {"N", "N_MINUS_1"},
+    "RESULTAT_NET": {"N", "N_MINUS_1"},
+    "FONDS_PROPRES": {"N", "N_MINUS_1"},
+    "TOTAL_ACTIF": {"N", "N_MINUS_1"},
+    "TOTAL_PASSIF": {"N", "N_MINUS_1"},
+    "TOTAL_BILAN": {"N", "N_MINUS_1"},
+    "DETTES_FINANCIERES": {"N"},
+    "PASSIF_CIRCULANT": {"N"},
+    "ACTIF_CIRCULANT": {"N"},
+    "ACTIFS_IMMOBILISES": {"N"},
+    "STOCKS": {"N"},
+    "CLIENTS": {"N"},
+    "FOURNISSEURS": {"N"},
+    "TRESORERIE_ACTIF": {"N"},
+    "TRESORERIE_PASSIF": {"N"},
+    "RESULTAT_EXPLOITATION": {"N"},
+    "PRODUITS_EXPLOITATION": {"N"},
+    "CHARGES_EXPLOITATION": {"N"},
+    "PRODUITS_FINANCIERS": {"N"},
+    "CHARGES_FINANCIERES": {"N"},
+    "RESULTAT_FINANCIER": {"N"},
+    "RESULTAT_COURANT": {"N"},
+    "PRODUITS_NON_COURANTS": {"N"},
+    "CHARGES_NON_COURANTES": {"N"},
+    "RESULTAT_NON_COURANT": {"N"},
+    "RESULTAT_AVANT_IMPOT": {"N"},
+    "IMPOT_SUR_RESULTATS": {"N"},
+    "ACHATS_REVENDUS": {"N"},
+    "ACHATS_CONSOMMES": {"N"},
+    "CHARGES_INTERETS": {"N"},
+    "DOTATIONS_AMORTISSEMENTS": {"N"},
+    "PRODUITS_CESSION_IMMOBILISATIONS": {"N"},
+    "VALEUR_NETTE_IMMOBILISATIONS_CEDEES": {"N"},
+    "REDEVANCES_CREDIT_BAIL": {"N"},
+    "RESULTAT_NET_XIII": {"N"},
+    "RESULTAT_NET_XVI": {"N"},
+    "RESULTAT_FISCAL": {"N"},
+    "REINTEGRATIONS": {"N"},
+    "DEDUCTIONS": {"N"},
+    "IS_DU": {"N"},
+    "COTISATION_MINIMALE": {"N"},
+    "REPORT_DEFICITAIRE": {"N"},
+}
 
 _ACTIF_CURRENT_FIELDS = {
     "TOTAL_ACTIF",
@@ -264,8 +313,77 @@ def dataset_field_code(candidate: FinancialCandidate) -> str:
     return code
 
 
+def canonicalize_column_role(
+    candidate: FinancialCandidate,
+) -> FinancialCandidate:
+    """Normalise column_role depuis column_name (alias OCR inclus)."""
+    name = _fold(candidate.evidence.column_name or "")
+    role = candidate.evidence.column_role
+    section = candidate.evidence.section
+
+    if section == "CPC":
+        current_total_aliases = (
+            "3 1 2",
+            "3 = 1 + 2",
+            "3=1+2",
+            "totaux de l exercice",
+            "totaux de lexercice",
+            "total de l exercice",
+            "total de lexercice",
+            "taux du exercice",
+            "taux de l exercice",
+            "taux de lexercice",
+        )
+        # Forme compacte pour « 3 = 1 + 2 » OCR → « 3 1 2 »
+        compact = re.sub(r"[^0-9a-z]+", " ", name)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        if any(alias in name for alias in current_total_aliases) or "3 1 2" in compact:
+            role = "TOTAL_EXERCICE_N"
+        elif "exercice precedent" in name or name.strip() == "4":
+            role = "EXERCICE_N1"
+
+    elif section == "BILAN_ACTIF":
+        if "net" in name and "precedent" not in name:
+            role = "NET_N"
+        elif "precedent" in name:
+            role = "EXERCICE_N1"
+        elif "brut" in name:
+            role = "BRUT"
+
+    elif section == "BILAN_PASSIF":
+        if "precedent" in name:
+            role = "EXERCICE_N1"
+        elif "exercice" in name:
+            role = "EXERCICE_N"
+
+    elif section == "DETAIL_CPC":
+        if "precedent" in name:
+            role = "EXERCICE_N1"
+        elif "exercice" in name or "totaux" in name or "3 1 2" in name:
+            role = "EXERCICE_N"
+
+    if role == candidate.evidence.column_role:
+        return candidate
+
+    evidence = candidate.evidence.model_copy(update={"column_role": role})
+    return candidate.model_copy(
+        update={
+            "evidence": evidence,
+            "warnings": [
+                *candidate.warnings,
+                (
+                    "column_role normalisé depuis "
+                    f"column_name={candidate.evidence.column_name!r}."
+                ),
+            ],
+        }
+    )
+
+
 def is_total_general_candidate(candidate: FinancialCandidate) -> bool:
     label = normalize_label(candidate.evidence.raw_label)
+    label = re.sub(r"[*_`#]", " ", label)
+    label = re.sub(r"\s+", " ", label).strip()
     return (
         candidate.nature == "GRAND_TOTAL"
         and bool(_TOTAL_GENERAL_RE.search(label))
@@ -278,7 +396,6 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
     role = candidate.evidence.column_role
     section = candidate.evidence.section
     field_code = str(candidate.field_code)
-    resolved_code = dataset_field_code(candidate)
 
     if field_code == "UNKNOWN":
         reasons.append("Code UNKNOWN non résolvable.")
@@ -287,11 +404,16 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
     if field_code not in allowed:
         reasons.append(f"{field_code} interdit dans la section {section}.")
 
+    supported = SUPPORTED_PERIODS_BY_FIELD.get(field_code, {"N"})
+    if candidate.period not in supported:
+        logger.debug(
+            "Candidat ignoré car période non stockée : field=%s period=%s",
+            field_code,
+            candidate.period,
+        )
+        return False, ["Période non utilisée dans la version actuelle."]
+
     if candidate.period == "N_MINUS_1":
-        if field_code not in _N1_CODE_MAP:
-            reasons.append(
-                f"Période N-1 non supportée pour le champ {field_code}."
-            )
         if role != "EXERCICE_N1":
             reasons.append("Un champ N-1 exige column_role=EXERCICE_N1.")
     else:
@@ -482,8 +604,8 @@ def sanitize_candidate(candidate: FinancialCandidate) -> FinancialCandidate:
     raw = clean_qwen_marker(candidate.raw_value)
     evidence = candidate.evidence.model_copy(
         update={
-            "raw_value": clean_qwen_marker(candidate.evidence.raw_value),
             "source_excerpt": clean_qwen_marker(candidate.evidence.source_excerpt),
+            "raw_label": clean_qwen_marker(candidate.evidence.raw_label),
         }
     )
     return candidate.model_copy(update={"raw_value": raw, "evidence": evidence})
@@ -494,6 +616,7 @@ def group_candidates_by_field(outputs: list[FinancialMappingOutput]) -> dict[str
     for output in outputs:
         for candidate in output.candidates:
             candidate = sanitize_candidate(candidate)
+            candidate = canonicalize_column_role(candidate)
             candidate = infer_period_from_column(candidate)
             if candidate.field_code == "UNKNOWN":
                 continue
@@ -527,7 +650,7 @@ def _to_provenance(candidate: FinancialCandidate) -> ValueProvenance:
     return ValueProvenance(
         page_number=candidate.evidence.page_number,
         raw_label=candidate.evidence.raw_label,
-        raw_value=candidate.raw_value or candidate.evidence.raw_value,
+        raw_value=candidate.raw_value,
         column_name=candidate.evidence.column_name,
         extraction_method="qwen_mapping",
         confidence=Decimal(str(candidate.confidence)),
@@ -566,7 +689,15 @@ def _eligible_sorted(candidates: list[FinancialCandidate]) -> list[tuple[Financi
     for candidate in candidates:
         ok, reasons = candidate_is_eligible(candidate)
         if not ok:
-            logger.warning("Candidate %s rejected: %s", candidate.field_code, "; ".join(reasons))
+            period_skip = reasons == [
+                "Période non utilisée dans la version actuelle."
+            ]
+            log_fn = logger.debug if period_skip else logger.warning
+            log_fn(
+                "Candidate %s rejected: %s",
+                candidate.field_code,
+                "; ".join(reasons),
+            )
             continue
         amount, parse_warnings = _parse_candidate_amount(candidate)
         if amount is None:

@@ -286,3 +286,100 @@ def split_financial_sections(
                     previous_section = item.section
 
     return outputs
+
+
+_PASSIF_SUBSECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "CAPITAUX_PROPRES",
+        re.compile(r"\bcapitaux\s+propres\b", re.IGNORECASE),
+    ),
+    (
+        "DETTES_FINANCEMENT",
+        re.compile(r"\bdet+es?\s+de\s+financement\b", re.IGNORECASE),
+    ),
+    (
+        "PASSIF_CIRCULANT",
+        re.compile(r"\bpassif\s+circulant\b", re.IGNORECASE),
+    ),
+    (
+        "TRESORERIE_PASSIF",
+        re.compile(r"\btresorerie\s*[-–—]?\s*passif\b", re.IGNORECASE),
+    ),
+]
+
+_CPC_SUBSECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    (
+        "PRODUITS_EXPLOITATION",
+        re.compile(r"\bproduits\s+d['\u2019]?\s*exploitation\b", re.IGNORECASE),
+    ),
+    (
+        "CHARGES_EXPLOITATION",
+        re.compile(r"\bcharges\s+d['\u2019]?\s*exploitation\b", re.IGNORECASE),
+    ),
+    (
+        "PRODUITS_CHARGES_FINANCIERS",
+        re.compile(
+            r"\b(?:produits|charges)\s+financi[eè]res?\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "RESULTATS",
+        re.compile(
+            r"\b(?:xiii|xvi)?\s*resultat\s+net\b|\bresultat\s+courant\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "NON_COURANT",
+        re.compile(r"\b(?:produits|charges)\s+non\s+courants?\b", re.IGNORECASE),
+    ),
+]
+
+
+def _split_by_patterns(
+    section_input: FinancialSectionInput,
+    patterns: list[tuple[str, re.Pattern[str]]],
+) -> list[FinancialSectionInput]:
+    markdown = section_input.markdown
+    starts: list[tuple[int, str]] = []
+    for subsection, pattern in patterns:
+        for match in pattern.finditer(markdown):
+            starts.append((match.start(), subsection))
+    starts.sort(key=lambda item: item[0])
+
+    deduped: list[tuple[int, str]] = []
+    for position, subsection in starts:
+        if deduped and abs(position - deduped[-1][0]) < 20:
+            continue
+        deduped.append((position, subsection))
+    starts = deduped
+
+    if len(starts) < 2:
+        return [section_input]
+
+    outputs: list[FinancialSectionInput] = []
+    for index, (start, subsection) in enumerate(starts):
+        end = starts[index + 1][0] if index + 1 < len(starts) else len(markdown)
+        segment = markdown[start:end].strip()
+        if not segment:
+            continue
+        outputs.append(
+            FinancialSectionInput(
+                section=section_input.section,
+                page_number=section_input.page_number,
+                markdown=f"SOUS-SECTION : {subsection}\n\n{segment}",
+            )
+        )
+    return outputs or [section_input]
+
+
+def split_large_financial_section(
+    section_input: FinancialSectionInput,
+) -> list[FinancialSectionInput]:
+    """Découpe métier d'une section trop longue (passif / CPC)."""
+    if section_input.section == "BILAN_PASSIF":
+        return _split_by_patterns(section_input, _PASSIF_SUBSECTION_PATTERNS)
+    if section_input.section == "CPC":
+        return _split_by_patterns(section_input, _CPC_SUBSECTION_PATTERNS)
+    return [section_input]

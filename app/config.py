@@ -63,6 +63,9 @@ OLLAMA_MAPPING_MAX_ATTEMPTS = int(os.getenv("OLLAMA_MAPPING_MAX_ATTEMPTS", "3"))
 OLLAMA_MAPPING_MAX_SECTION_CHARS = int(
     os.getenv("OLLAMA_MAPPING_MAX_SECTION_CHARS", "60000")
 )
+OLLAMA_MAPPING_SPLIT_THRESHOLD_CHARS = int(
+    os.getenv("OLLAMA_MAPPING_SPLIT_THRESHOLD_CHARS", "12000")
+)
 
 # --- Répertoires ----------------------------------------------------------
 STATIC_DIR = BASE_DIR / "static"

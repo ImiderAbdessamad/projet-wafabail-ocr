@@ -65,7 +65,6 @@ def _c(
             page_number=page,
             section=section,  # type: ignore[arg-type]
             raw_label=label,
-            raw_value=raw,
             column_name=column,
             column_role=column_role,  # type: ignore[arg-type]
             source_excerpt=f"| {label} | {raw} |",

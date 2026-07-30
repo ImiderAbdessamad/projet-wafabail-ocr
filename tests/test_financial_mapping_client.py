@@ -36,7 +36,6 @@ def _ok_mapping_json(section: str = "CPC") -> str:
                         "page_number": 1,
                         "section": section,
                         "raw_label": "Chiffre d'affaires",
-                        "raw_value": "13 404 177,00",
                         "column_name": "Totaux de l'exercice",
                         "column_role": "TOTAL_EXERCICE_N",
                         "source_excerpt": "| Chiffre d'affaires | 13 404 177,00 |",
@@ -169,7 +168,7 @@ def test_wrong_section_rejected():
         "app.services.financial_mapping_client.httpx.AsyncClient",
         return_value=mock_client,
     ):
-        with pytest.raises(FinancialMappingError, match="section imposée"):
+        with pytest.raises(FinancialMappingError, match="JSON Schema"):
             asyncio.run(map_financial_section(section, max_attempts=1))
 
 

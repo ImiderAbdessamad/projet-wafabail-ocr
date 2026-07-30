@@ -65,7 +65,6 @@ def _cand(
             page_number=page,
             section=section,  # type: ignore[arg-type]
             raw_label=label or field_code,
-            raw_value=raw_value,
             column_name=column,
             column_role=role,  # type: ignore[arg-type]
             source_excerpt=f"| {label} | {raw_value} |",
@@ -171,6 +170,7 @@ def test_period_n_required_for_current_fields():
         "period=n" in r.lower()
         or "champ courant" in r.lower()
         or "n-1 non supportée" in r.lower()
+        or "période non utilisée" in r.lower()
         for r in reasons
     )
 
@@ -484,7 +484,6 @@ def test_raw_value_none_rejected_by_schema():
                 page_number=1,
                 section="CPC",
                 raw_label="CA",
-                raw_value="",
                 column_name="Totaux",
                 column_role="TOTAL_EXERCICE_N",
                 source_excerpt="x",
