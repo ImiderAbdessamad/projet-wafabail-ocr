@@ -26,7 +26,6 @@ from app.services.direct_glm_financial_client import (
 def _ok_actif_json() -> str:
     return json.dumps(
         {
-            "page_type": "BILAN_ACTIF",
             "candidates": [
                 {
                     "field_code": "TOTAL_ACTIF",
@@ -35,13 +34,10 @@ def _ok_actif_json() -> str:
                     "nature": "GRAND_TOTAL",
                     "confidence": 0.9,
                     "evidence": {
-                        "page_number": 2,
-                        "page_type": "BILAN_ACTIF",
                         "raw_label": "TOTAL GENERAL I+II+III",
                         "column_name": "Net",
                         "column_role": "NET_N",
                         "source_excerpt": "TOTAL GENERAL | 22 303 497,11",
-                        "orientation": 0,
                     },
                     "warnings": [],
                 }
@@ -167,7 +163,8 @@ def test_extract_financial_page_payload():
         )
 
     assert latency >= 0
-    assert result.page_type == "BILAN_ACTIF"
+    assert len(result.candidates) == 1
+    assert result.candidates[0].field_code == "TOTAL_ACTIF"
     assert captured["url"] == f"{OLLAMA_URL}/api/chat"
     payload = captured["payload"]
     assert payload["model"] == DIRECT_FINANCIAL_MODEL
@@ -176,6 +173,9 @@ def test_extract_financial_page_payload():
     assert payload["options"]["temperature"] == 0
     assert "images" in payload["messages"][1]
     assert isinstance(payload["format"], dict)
+    # Schéma lite : pas de page_number imbriqué obligatoire
+    schema_txt = json.dumps(payload["format"])
+    assert "page_number" not in schema_txt or "GlmLite" in str(type(result))
     # Aucun Qwen
     assert "qwen" not in payload["model"].lower()
 
@@ -236,3 +236,28 @@ def test_raw_value_required():
 
 def test_schema_for_page_type():
     assert schema_for_page_type("CPC") is CpcOutput
+
+
+def test_lite_validate_tolerates_period_alias():
+    from app.services.direct_glm_financial_client import _validate_lite_content
+
+    raw = json.dumps(
+        {
+            "candidates": [
+                {
+                    "field_code": "CHIFFRE_AFFAIRES",
+                    "raw_value": "1 234 567,89",
+                    "period": "N-1",
+                    "nature": "DETAIL",
+                    "evidence": {
+                        "raw_label": "Chiffre d'affaires",
+                        "column_role": "4",
+                    },
+                }
+            ]
+        }
+    )
+    out = _validate_lite_content(raw, "CPC")
+    assert len(out.candidates) == 1
+    assert out.candidates[0].period == "N_MINUS_1"
+    assert out.candidates[0].evidence.column_role == "EXERCICE_N1"

@@ -42,7 +42,6 @@ from app.services.direct_glm_financial_client import (
     DirectFinancialLengthError,
     extract_financial_page,
     prompt_for_page_type,
-    schema_for_page_type,
     warmup_direct_financial_model,
 )
 from app.services.financial_controls import (
@@ -59,10 +58,7 @@ from app.services.financial_page_classifier import (
 )
 from app.services.financial_ratios import calculate_financial_ratios
 from app.services.financial_scoring import calculate_financial_score
-from app.services.page_preprocessor import (
-    crop_content_regions,
-    detect_content_box,
-)
+from app.services.page_preprocessor import crop_content_regions
 from app.services.behavioral_scoring import calculate_behavioral_score
 from app.services.sector_scoring import calculate_sector_score
 
@@ -119,12 +115,18 @@ _MEANINGFUL_CODES: dict[str, frozenset[str]] = {
         {
             "CHIFFRE_AFFAIRES",
             "RESULTAT_NET",
+            "RESULTAT_NET_XIII",
+            "RESULTAT_NET_XVI",
             "RESULTAT_EXPLOITATION",
             "RESULTAT_COURANT",
             "RESULTAT_FINANCIER",
+            "CHARGES_FINANCIERES",
             "ACHATS",
+            "ACHATS_REVENDUS",
+            "ACHATS_CONSOMMES",
             "FRAIS_FINANCIERS",
             "AMORTISSEMENTS",
+            "DOTATIONS_AMORTISSEMENTS",
         }
     ),
     "DETAIL_CPC": frozenset({"REDEVANCES_CREDIT_BAIL", "ACHATS"}),
@@ -185,14 +187,11 @@ def count_pdf_pages(pdf_bytes: bytes) -> int:
 
 
 def _downscale_png(image_bytes: bytes, max_dim: int) -> bytes:
+    """Redimensionne sans crop agressif (les tableaux scannés perdent des chiffres)."""
     with Image.open(io.BytesIO(image_bytes)) as img:
         img = img.convert("RGB")
         if max(img.size) > max_dim:
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-        # Crop prudent
-        box = detect_content_box(img)
-        if box != (0, 0, img.width, img.height):
-            img = img.crop(box)
         out = io.BytesIO()
         img.save(out, format="PNG", optimize=True)
         return out.getvalue()
@@ -237,24 +236,32 @@ def _convert_page_output(
     candidates: list[DirectFinancialCandidate] = []
     for item in getattr(mapped, "candidates", []) or []:
         data = item.model_dump() if hasattr(item, "model_dump") else dict(item)
-        evidence = data.get("evidence") or {}
+        evidence = dict(data.get("evidence") or {})
         evidence["page_number"] = page_number
         evidence["page_type"] = page_type
         evidence["orientation"] = orientation
+        if not evidence.get("raw_label"):
+            evidence["raw_label"] = str(data.get("field_code") or "?")
+        if not evidence.get("source_excerpt"):
+            evidence["source_excerpt"] = (
+                f"{evidence['raw_label']}|{data.get('raw_value', '')}"
+            )[:240]
+        if not evidence.get("column_role"):
+            evidence["column_role"] = "UNKNOWN"
         try:
             candidates.append(
                 DirectFinancialCandidate(
                     field_code=str(data["field_code"]),
                     raw_value=str(data["raw_value"]),
-                    period=data["period"],
-                    nature=data["nature"],
+                    period=data.get("period") or "N",
+                    nature=data.get("nature") or "DETAIL",
                     confidence=float(data.get("confidence", 0.5)),
                     evidence=DirectFinancialEvidence.model_validate(evidence),
                     warnings=list(data.get("warnings") or []),
                 )
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Candidat page %d ignoré : %s", page_number, exc)
+            logger.warning("Candidat page %d ignoré : %s | data=%s", page_number, exc, data)
     return candidates
 
 
@@ -265,7 +272,6 @@ async def _extract_with_regions(
     page_type: str,
     orientation: int,
 ) -> tuple[list[DirectFinancialCandidate], int, str]:
-    schema = schema_for_page_type(page_type)
     prompt = prompt_for_page_type(page_type)
     regions = crop_content_regions(oriented_image)
     merged: list[DirectFinancialCandidate] = []
@@ -278,7 +284,6 @@ async def _extract_with_regions(
                 page_number=page_number,
                 page_type=page_type,
                 orientation=orientation,
-                schema_model=schema,
                 system_prompt=prompt,
                 max_attempts=1,
             )
@@ -308,42 +313,56 @@ async def _extract_once(
     page_type: str,
     orientation: int,
 ) -> tuple[list[DirectFinancialCandidate], int | None, str, str | None]:
-    """Une tentative full-page (+ regional fallback)."""
-    schema = schema_for_page_type(page_type)
+    """Full-page puis régions si 0 candidat (tables denses / schéma trop lourd)."""
     prompt = prompt_for_page_type(page_type)
+    total_latency = 0
     try:
         mapped, latency_ms = await extract_financial_page(
             image_bytes,
             page_number=page_number,
             page_type=page_type,
             orientation=orientation,
-            schema_model=schema,
             system_prompt=prompt,
         )
-        return (
-            _convert_page_output(
-                mapped,
-                page_number=page_number,
-                page_type=page_type,  # type: ignore[arg-type]
-                orientation=orientation,
-            ),
-            latency_ms,
-            "full_page",
-            None,
+        total_latency += latency_ms or 0
+        cands = _convert_page_output(
+            mapped,
+            page_number=page_number,
+            page_type=page_type,  # type: ignore[arg-type]
+            orientation=orientation,
         )
+        if cands:
+            return cands, total_latency, "full_page", None
+        # Succès JSON mais liste vide → forcer découpe haute/basse
+        if DIRECT_FINANCIAL_REGION_FALLBACK and page_type != "IDENTIFICATION":
+            logger.info(
+                "Page %d type=%s : 0 candidat full-page → régions",
+                page_number,
+                page_type,
+            )
+            region_cands, region_ms, strategy = await _extract_with_regions(
+                image_bytes,
+                page_number=page_number,
+                page_type=page_type,
+                orientation=orientation,
+            )
+            total_latency += region_ms or 0
+            if region_cands:
+                return region_cands, total_latency, strategy, None
+        return [], total_latency, "full_page", None
     except DirectFinancialLengthError:
         if not DIRECT_FINANCIAL_REGION_FALLBACK:
-            return [], None, "length", "done_reason=length"
+            return [], total_latency or None, "length", "done_reason=length"
         cands, latency_ms, strategy = await _extract_with_regions(
             image_bytes,
             page_number=page_number,
             page_type=page_type,
             orientation=orientation,
         )
-        return cands, latency_ms, strategy, None
+        return cands, (total_latency + (latency_ms or 0)) or None, strategy, None
     except DirectFinancialExtractionError as exc:
         if not DIRECT_FINANCIAL_REGION_FALLBACK:
-            return [], None, "failed", str(exc)
+            return [], total_latency or None, "failed", str(exc)
         try:
             cands, latency_ms, strategy = await _extract_with_regions(
                 image_bytes,
@@ -351,9 +370,9 @@ async def _extract_once(
                 page_type=page_type,
                 orientation=orientation,
             )
-            return cands, latency_ms, strategy, None
+            return cands, (total_latency + (latency_ms or 0)) or None, strategy, None
         except DirectFinancialExtractionError as region_exc:
-            return [], None, "failed", str(region_exc)
+            return [], total_latency or None, "failed", str(region_exc)
 
 
 async def analyze_financial_document(
@@ -432,23 +451,59 @@ async def analyze_financial_document(
             },
         )
 
-        if page_type in {"AUTRE", "VIDE"}:
+        if page_type == "VIDE":
             pages_skipped += 1
             page_audit.append(
                 FinancialPageAudit(
                     page_number=page_no,
                     detected_type=page_type,
                     orientation=orientation,  # type: ignore[arg-type]
-                    extraction_status="skipped" if page_type == "AUTRE" else "empty",
+                    extraction_status="empty",
                     extraction_strategy="classification",
-                    warnings=["Page ignorée (non financière)."],
+                    warnings=["Page vide."],
                 )
             )
-            _emit(
-                "page_skipped",
-                {"page": page_no, "page_type": page_type},
-            )
+            _emit("page_skipped", {"page": page_no, "page_type": page_type})
             continue
+
+        # AUTRE après pages financières : souvent un faux négatif (ESG / fiscal).
+        if page_type == "AUTRE":
+            if previous_type in {
+                "BILAN_ACTIF",
+                "BILAN_PASSIF",
+                "CPC",
+                "DETAIL_CPC",
+                "RESULTAT_FISCAL",
+                "ESG",
+                "IDENTIFICATION",
+            }:
+                guessed = next_types_to_try(
+                    primary="CPC",
+                    previous_page_type=previous_type,
+                )
+                page_type = guessed[0] if guessed else "CPC"  # type: ignore[assignment]
+                logger.warning(
+                    "Page %d classée AUTRE → extraction forcée en %s",
+                    page_no,
+                    page_type,
+                )
+            else:
+                pages_skipped += 1
+                page_audit.append(
+                    FinancialPageAudit(
+                        page_number=page_no,
+                        detected_type="AUTRE",
+                        orientation=orientation,  # type: ignore[arg-type]
+                        extraction_status="skipped",
+                        extraction_strategy="classification",
+                        warnings=["Page ignorée (non financière)."],
+                    )
+                )
+                _emit(
+                    "page_skipped",
+                    {"page": page_no, "page_type": "AUTRE"},
+                )
+                continue
 
         if page_type not in _EXTRACTABLE:
             pages_skipped += 1
@@ -524,6 +579,10 @@ async def analyze_financial_document(
                     len(cands),
                     strategy,
                 )
+                # Toujours garder la latence cumulée même si 0 candidat.
+                if latency_ms is not None:
+                    best_latency = (best_latency or 0) + latency_ms
+
                 better = len(cands) > len(best_candidates) or (
                     len(cands) == len(best_candidates)
                     and _has_meaningful_candidates(try_type, cands)
@@ -535,7 +594,6 @@ async def analyze_financial_document(
                     best_type = try_type
                     best_orientation = try_orient
                     best_strategy = strategy
-                    best_latency = latency_ms
                     working_orientation = try_orient
                     working_image = img
                     if try_type != page_type and try_type != prev_type_label:

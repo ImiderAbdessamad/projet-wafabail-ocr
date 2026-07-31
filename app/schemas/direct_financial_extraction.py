@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -272,6 +272,106 @@ PAGE_TYPE_SCHEMAS: dict[str, type[BaseModel]] = {
     "DETAIL_CPC": DetailCpcOutput,
     "RESULTAT_FISCAL": FiscalOutput,
     "ESG": EsgOutput,
+}
+
+
+# ---------------------------------------------------------------------------
+# Schémas LEGERS pour Ollama (contrainte JSON) — sans page_number / page_type
+# imbriqués. Le pipeline injecte ces métadonnées après coup.
+# ---------------------------------------------------------------------------
+
+
+class GlmLiteEvidence(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    raw_label: str = Field(min_length=1, max_length=120)
+    column_name: str | None = Field(default=None, max_length=80)
+    column_role: ColumnRole = "UNKNOWN"
+    source_excerpt: str = Field(default="", max_length=160)
+
+
+class GlmLiteCandidate(BaseModel):
+    """Candidat minimal : field_code en str (filtré ensuite côté Python)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    field_code: str = Field(min_length=2, max_length=64)
+    raw_value: str = Field(min_length=1, max_length=64)
+    period: FinancialPeriod = "N"
+    nature: CandidateNature = "DETAIL"
+    confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    evidence: GlmLiteEvidence
+    warnings: list[str] = Field(default_factory=list)
+
+
+class GlmLitePageOutput(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    candidates: list[GlmLiteCandidate] = Field(default_factory=list, max_length=15)
+
+
+ALLOWED_FIELD_CODES: dict[str, frozenset[str]] = {
+    "IDENTIFICATION": frozenset(get_args(IdentificationFieldCode)),
+    "BILAN_ACTIF": frozenset(get_args(BilanActifFieldCode)),
+    "BILAN_PASSIF": frozenset(get_args(BilanPassifFieldCode)),
+    "CPC": frozenset(get_args(CpcFieldCode))
+    | frozenset(
+        {"RESULTAT_NET", "ACHATS", "FRAIS_FINANCIERS", "AMORTISSEMENTS"}
+    ),
+    "DETAIL_CPC": frozenset(get_args(DetailCpcFieldCode)),
+    "RESULTAT_FISCAL": frozenset(get_args(FiscalFieldCode)),
+    "ESG": frozenset(get_args(EsgFieldCode))
+    | frozenset({"FDR", "BFDR", "TRESORERIE_NETTE"}),
+}
+
+PRIORITY_FIELDS: dict[str, tuple[str, ...]] = {
+    "IDENTIFICATION": (
+        "RAISON_SOCIALE",
+        "IDENTIFIANT_FISCAL",
+        "ICE",
+        "ADRESSE",
+        "DATE_DEBUT_EXERCICE",
+        "DATE_FIN_EXERCICE",
+        "EXERCICE",
+    ),
+    "BILAN_ACTIF": (
+        "TOTAL_ACTIF",
+        "ACTIFS_IMMOBILISES",
+        "ACTIF_CIRCULANT",
+        "STOCKS",
+        "CLIENTS",
+        "TRESORERIE_ACTIF",
+    ),
+    "BILAN_PASSIF": (
+        "TOTAL_PASSIF",
+        "FONDS_PROPRES",
+        "RESULTAT_NET",
+        "DETTES_FINANCIERES",
+        "PASSIF_CIRCULANT",
+        "FOURNISSEURS",
+        "TRESORERIE_PASSIF",
+    ),
+    "CPC": (
+        "CHIFFRE_AFFAIRES",
+        "RESULTAT_NET",
+        "RESULTAT_NET_XVI",
+        "RESULTAT_EXPLOITATION",
+        "RESULTAT_COURANT",
+        "CHARGES_FINANCIERES",
+        "ACHATS_REVENDUS",
+        "ACHATS_CONSOMMES",
+        "DOTATIONS_AMORTISSEMENTS",
+    ),
+    "DETAIL_CPC": ("REDEVANCES_CREDIT_BAIL",),
+    "RESULTAT_FISCAL": (
+        "RESULTAT_FISCAL",
+        "REINTEGRATIONS",
+        "DEDUCTIONS",
+        "IS_DU",
+        "COTISATION_MINIMALE",
+        "REPORT_DEFICITAIRE",
+    ),
+    "ESG": ("CAF", "EBE", "VALEUR_AJOUTEE"),
 }
 
 
