@@ -53,7 +53,10 @@ from app.services.financial_orientation_detector import (
     detect_page_orientation,
     rotate_to_orientation,
 )
-from app.services.financial_page_classifier import classify_financial_page
+from app.services.financial_page_classifier import (
+    classify_financial_page,
+    next_types_to_try,
+)
 from app.services.financial_ratios import calculate_financial_ratios
 from app.services.financial_scoring import calculate_financial_score
 from app.services.page_preprocessor import (
@@ -76,6 +79,79 @@ _EXTRACTABLE: set[str] = {
     "RESULTAT_FISCAL",
     "ESG",
 }
+
+# Signaux qu'un schéma colle réellement à la page (évite d'arrêter sur
+# 2–3 candidats hors-cible quand le type est faux).
+_MEANINGFUL_CODES: dict[str, frozenset[str]] = {
+    "IDENTIFICATION": frozenset(
+        {
+            "RAISON_SOCIALE",
+            "IDENTIFIANT_FISCAL",
+            "ICE",
+            "ADRESSE",
+            "DATE_DEBUT_EXERCICE",
+            "DATE_FIN_EXERCICE",
+            "EXERCICE",
+        }
+    ),
+    "BILAN_ACTIF": frozenset(
+        {
+            "TOTAL_ACTIF",
+            "STOCKS",
+            "CLIENTS",
+            "TRESORERIE_ACTIF",
+            "ACTIF_CIRCULANT",
+            "ACTIFS_IMMOBILISES",
+        }
+    ),
+    "BILAN_PASSIF": frozenset(
+        {
+            "FONDS_PROPRES",
+            "DETTES_FINANCIERES",
+            "TOTAL_PASSIF",
+            "FOURNISSEURS",
+            "PASSIF_CIRCULANT",
+            "TRESORERIE_PASSIF",
+            "DETTES_BANCAIRES_CT",
+        }
+    ),
+    "CPC": frozenset(
+        {
+            "CHIFFRE_AFFAIRES",
+            "RESULTAT_NET",
+            "RESULTAT_EXPLOITATION",
+            "RESULTAT_COURANT",
+            "RESULTAT_FINANCIER",
+            "ACHATS",
+            "FRAIS_FINANCIERS",
+            "AMORTISSEMENTS",
+        }
+    ),
+    "DETAIL_CPC": frozenset({"REDEVANCES_CREDIT_BAIL", "ACHATS"}),
+    "RESULTAT_FISCAL": frozenset(
+        {
+            "RESULTAT_FISCAL",
+            "REINTEGRATIONS",
+            "DEDUCTIONS",
+            "IS_DU",
+            "COTISATION_MINIMALE",
+            "REPORT_DEFICITAIRE",
+        }
+    ),
+    "ESG": frozenset({"CAF", "FDR", "BFDR", "TRESORERIE_NETTE"}),
+}
+
+
+def _has_meaningful_candidates(
+    page_type: str,
+    candidates: list[DirectFinancialCandidate],
+) -> bool:
+    if not candidates:
+        return False
+    codes = _MEANINGFUL_CODES.get(page_type)
+    if not codes:
+        return len(candidates) >= 2
+    return any(c.field_code in codes for c in candidates)
 
 
 @dataclass
@@ -225,6 +301,61 @@ async def _extract_with_regions(
     return dedupe_direct_candidates(merged), total_latency, "regional_fallback"
 
 
+async def _extract_once(
+    image_bytes: bytes,
+    *,
+    page_number: int,
+    page_type: str,
+    orientation: int,
+) -> tuple[list[DirectFinancialCandidate], int | None, str, str | None]:
+    """Une tentative full-page (+ regional fallback)."""
+    schema = schema_for_page_type(page_type)
+    prompt = prompt_for_page_type(page_type)
+    try:
+        mapped, latency_ms = await extract_financial_page(
+            image_bytes,
+            page_number=page_number,
+            page_type=page_type,
+            orientation=orientation,
+            schema_model=schema,
+            system_prompt=prompt,
+        )
+        return (
+            _convert_page_output(
+                mapped,
+                page_number=page_number,
+                page_type=page_type,  # type: ignore[arg-type]
+                orientation=orientation,
+            ),
+            latency_ms,
+            "full_page",
+            None,
+        )
+    except DirectFinancialLengthError:
+        if not DIRECT_FINANCIAL_REGION_FALLBACK:
+            return [], None, "length", "done_reason=length"
+        cands, latency_ms, strategy = await _extract_with_regions(
+            image_bytes,
+            page_number=page_number,
+            page_type=page_type,
+            orientation=orientation,
+        )
+        return cands, latency_ms, strategy, None
+    except DirectFinancialExtractionError as exc:
+        if not DIRECT_FINANCIAL_REGION_FALLBACK:
+            return [], None, "failed", str(exc)
+        try:
+            cands, latency_ms, strategy = await _extract_with_regions(
+                image_bytes,
+                page_number=page_number,
+                page_type=page_type,
+                orientation=orientation,
+            )
+            return cands, latency_ms, strategy, None
+        except DirectFinancialExtractionError as region_exc:
+            return [], None, "failed", str(region_exc)
+
+
 async def analyze_financial_document(
     pdf_bytes: bytes,
     filename: str,
@@ -332,88 +463,122 @@ async def analyze_financial_document(
             )
             continue
 
-        schema = schema_for_page_type(page_type)
-        prompt = prompt_for_page_type(page_type)
-        strategy = "full_page"
-        latency_ms: int | None = None
-        page_candidates: list[DirectFinancialCandidate] = []
+        # Essais : type classifié (+ alternates si 0 candidat) ;
+        # si orientation ≠ 0 et 0 candidat, retente aussi à 0°.
+        type_attempts = next_types_to_try(
+            primary=page_type,  # type: ignore[arg-type]
+            previous_page_type=previous_type,
+        )
+        # IDENTIFICATION : un seul schéma. Financiers : max 3 types.
+        if page_type == "IDENTIFICATION":
+            type_attempts = ["IDENTIFICATION"]
+        else:
+            type_attempts = type_attempts[:3]
 
-        try:
-            mapped, latency_ms = await extract_financial_page(
-                oriented,
-                page_number=page_no,
-                page_type=page_type,
-                orientation=orientation,
-                schema_model=schema,
-                system_prompt=prompt,
-            )
-            page_candidates = _convert_page_output(
-                mapped,
-                page_number=page_no,
-                page_type=page_type,
-                orientation=orientation,
-            )
-        except DirectFinancialLengthError:
-            if DIRECT_FINANCIAL_REGION_FALLBACK:
-                page_candidates, latency_ms, strategy = await _extract_with_regions(
-                    oriented,
+        best_candidates: list[DirectFinancialCandidate] = []
+        best_type = page_type
+        best_orientation = orientation
+        best_strategy = "full_page"
+        best_latency: int | None = None
+        last_error: str | None = None
+        page_warnings: list[str] = []
+
+        working_orientation = orientation
+        working_image = oriented
+
+        for try_type in type_attempts:
+            # Alt orientation seulement sur le 1er type (évite 6 appels GLM).
+            orients = [working_orientation]
+            if (
+                try_type == type_attempts[0]
+                and orientation != 0
+                and 0 not in orients
+            ):
+                orients.append(0)
+
+            for try_orient in orients:
+                if try_orient == working_orientation and try_orient == orientation:
+                    img = oriented
+                elif try_orient == working_orientation:
+                    img = working_image
+                else:
+                    img = rotate_to_orientation(
+                        rendered_page.image_bytes, try_orient
+                    )
+                    img = _downscale_png(
+                        img, DIRECT_FINANCIAL_MAX_IMAGE_DIMENSION
+                    )
+
+                cands, latency_ms, strategy, err = await _extract_once(
+                    img,
                     page_number=page_no,
-                    page_type=page_type,
-                    orientation=orientation,
+                    page_type=try_type,
+                    orientation=try_orient,
                 )
-            else:
-                pages_failed += 1
-                page_audit.append(
-                    FinancialPageAudit(
-                        page_number=page_no,
-                        detected_type=page_type,
-                        orientation=orientation,  # type: ignore[arg-type]
-                        extraction_status="failed",
-                        extraction_strategy="length",
-                        error="done_reason=length",
-                    )
+                last_error = err
+                logger.info(
+                    "Page %d try type=%s orient=%s → %d candidats (%s)",
+                    page_no,
+                    try_type,
+                    try_orient,
+                    len(cands),
+                    strategy,
                 )
-                _emit("page_failed", {"page": page_no, "error": "length"})
-                continue
-        except DirectFinancialExtractionError as exc:
-            if DIRECT_FINANCIAL_REGION_FALLBACK:
-                try:
-                    page_candidates, latency_ms, strategy = await _extract_with_regions(
-                        oriented,
-                        page_number=page_no,
-                        page_type=page_type,
-                        orientation=orientation,
-                    )
-                except DirectFinancialExtractionError as region_exc:
-                    pages_failed += 1
-                    page_audit.append(
-                        FinancialPageAudit(
-                            page_number=page_no,
-                            detected_type=page_type,
-                            orientation=orientation,  # type: ignore[arg-type]
-                            extraction_status="failed",
-                            extraction_strategy="failed",
-                            error=str(region_exc),
+                better = len(cands) > len(best_candidates) or (
+                    len(cands) == len(best_candidates)
+                    and _has_meaningful_candidates(try_type, cands)
+                    and not _has_meaningful_candidates(best_type, best_candidates)
+                )
+                if better and cands:
+                    prev_type_label = best_type
+                    best_candidates = cands
+                    best_type = try_type
+                    best_orientation = try_orient
+                    best_strategy = strategy
+                    best_latency = latency_ms
+                    working_orientation = try_orient
+                    working_image = img
+                    if try_type != page_type and try_type != prev_type_label:
+                        page_warnings.append(
+                            f"Type corrigé {page_type} → {try_type} "
+                            f"({len(cands)} candidats)."
                         )
-                    )
-                    warnings.append(f"Page {page_no} : {region_exc}")
-                    _emit("page_failed", {"page": page_no, "error": str(region_exc)})
-                    continue
-            else:
-                pages_failed += 1
-                page_audit.append(
-                    FinancialPageAudit(
-                        page_number=page_no,
-                        detected_type=page_type,
-                        orientation=orientation,  # type: ignore[arg-type]
-                        extraction_status="failed",
-                        extraction_strategy="failed",
-                        error=str(exc),
-                    )
+                    if try_orient != orientation:
+                        page_warnings.append(
+                            f"Orientation corrigée {orientation} → {try_orient}."
+                        )
+
+                # Au moins un champ métier utile → on arrête.
+                if _has_meaningful_candidates(best_type, best_candidates):
+                    break
+            if _has_meaningful_candidates(best_type, best_candidates):
+                break
+
+        page_type = best_type  # type: ignore[assignment]
+        orientation = best_orientation
+        strategy = best_strategy
+        latency_ms = best_latency
+        page_candidates = best_candidates
+
+        if not page_candidates and last_error:
+            pages_failed += 1
+            page_audit.append(
+                FinancialPageAudit(
+                    page_number=page_no,
+                    detected_type=page_type,
+                    orientation=orientation,  # type: ignore[arg-type]
+                    extraction_status="failed",
+                    extraction_strategy=strategy,
+                    error=last_error,
+                    warnings=page_warnings,
                 )
-                warnings.append(f"Page {page_no} : {exc}")
-                _emit("page_failed", {"page": page_no, "error": str(exc)})
-                continue
+            )
+            warnings.append(f"Page {page_no} : {last_error}")
+            _emit("page_failed", {"page": page_no, "error": last_error})
+            continue
+
+        if not page_candidates:
+            page_warnings.append("Aucun candidat extrait après retries.")
 
         # Métadonnées identification
         if page_type == "IDENTIFICATION":
@@ -440,7 +605,6 @@ async def analyze_financial_document(
         all_candidates.extend(page_candidates)
         pages_processed += 1
         # Ne propager que les types multi-pages financiers.
-        # IDENTIFICATION ne doit jamais « contaminer » les pages suivantes.
         if page_type in {
             "BILAN_ACTIF",
             "BILAN_PASSIF",
@@ -461,6 +625,7 @@ async def analyze_financial_document(
                 extraction_strategy=strategy,
                 candidates_count=len(page_candidates),
                 model_latency_ms=latency_ms,
+                warnings=page_warnings,
             )
         )
         _emit(

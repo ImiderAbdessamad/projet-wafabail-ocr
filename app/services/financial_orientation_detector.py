@@ -83,10 +83,17 @@ def detect_page_orientation(
     if declared_rotation is not None:
         declared = int(declared_rotation) % 360
         if declared in scores:
-            # Léger bonus à la rotation déclarée PDF
-            scores[declared] *= 1.08
+            # Bonus fort à la rotation PDF : les liasses scannées ont souvent
+            # déjà la bonne orientation (declared=0) alors que l'heuristique
+            # de lignes peut préférer 90/270 à tort.
+            scores[declared] *= 1.35
 
     best = max(scores, key=scores.get)  # type: ignore[arg-type]
+    # Si declared=0 et le meilleur non-nul gagne de peu, rester à 0.
+    if declared_rotation is not None and int(declared_rotation) % 360 == 0:
+        zero = scores.get(0, 0.0)
+        if best != 0 and zero > 0 and scores[best] / zero < 1.25:
+            best = 0
     logger.debug(
         "Orientation scores=%s → %s",
         {k: round(v, 3) for k, v in scores.items()},

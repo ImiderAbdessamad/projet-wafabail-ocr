@@ -224,6 +224,8 @@ async def classify_page_with_glm(
     *,
     discourage_identification: bool = False,
     force_financial_hint: bool = False,
+    previous_page_type: FinancialPageType | None = None,
+    page_number: int | None = None,
 ) -> FinancialPageType:
     """Mini-appel GLM pour classer une page scannée sans texte natif."""
     light = _downscale_for_classify(image_bytes)
@@ -246,12 +248,25 @@ async def classify_page_with_glm(
         "- IDENTIFICATION uniquement si page d'identité du contribuable "
         "(raison sociale, IF, ICE) SANS grand tableau financier\n"
         "- VIDE = page blanche ; AUTRE = annexe admin non financière\n"
+        "Ordre typique d'une liasse : IDENTIFICATION → BILAN_ACTIF → "
+        "BILAN_PASSIF → CPC → DETAIL_CPC → RESULTAT_FISCAL / ESG.\n"
+        "Ne répète pas le type précédent sauf si la page est clairement "
+        "la suite du même état.\n"
         "Réponds uniquement en JSON."
     )
     user = "Quel est le type de cette page ?"
+    if page_number is not None:
+        user += f" Numéro de page : {page_number}."
+    if previous_page_type:
+        user += (
+            f" Page précédente classée : {previous_page_type}. "
+            "Utilise cela seulement comme indice d'ordre, pas comme "
+            "copie automatique."
+        )
     if discourage_identification:
         user += (
-            " Attention : la page précédente était déjà IDENTIFICATION. "
+            " Attention : la page précédente était déjà IDENTIFICATION "
+            "ou tu es après la page 1. "
             "N'utilise IDENTIFICATION que si c'est vraiment encore la page "
             "d'identité. Si tu vois un tableau financier, choisis BILAN_ACTIF, "
             "BILAN_PASSIF, CPC, DETAIL_CPC, RESULTAT_FISCAL ou ESG."
@@ -261,6 +276,14 @@ async def classify_page_with_glm(
             " Cette page contient très probablement un état financier "
             "(bilan ou CPC). Ne réponds PAS IDENTIFICATION."
         )
+        if previous_page_type == "IDENTIFICATION":
+            user += " Après identification, essaie d'abord BILAN_ACTIF."
+        elif previous_page_type == "BILAN_ACTIF":
+            user += " Après bilan actif, essaie d'abord BILAN_PASSIF."
+        elif previous_page_type == "BILAN_PASSIF":
+            user += " Après bilan passif, essaie d'abord CPC."
+        elif previous_page_type == "CPC":
+            user += " Après CPC, essaie DETAIL_CPC ou RESULTAT_FISCAL."
 
     payload = {
         "model": DIRECT_FINANCIAL_MODEL,

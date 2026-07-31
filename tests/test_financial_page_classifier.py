@@ -128,3 +128,41 @@ def test_identification_does_not_continue_on_scanned_pages():
         )
     )
     assert result != "IDENTIFICATION"
+
+
+def test_bilan_actif_does_not_blind_continue_on_empty_scan():
+    """Bug SERDILAB run2 : pages 2–7 ne doivent pas coller en BILAN_ACTIF sans GLM."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (400, 500), "white")
+    draw = ImageDraw.Draw(img)
+    for y in range(40, 460, 20):
+        draw.line((30, y, 370, y), fill="black", width=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+
+    result = asyncio.run(
+        classify_financial_page(
+            image_bytes=data,
+            native_text="",
+            previous_page_type="BILAN_ACTIF",
+            use_glm_fallback=False,
+            page_number=3,
+        )
+    )
+    assert result != "BILAN_ACTIF"
+
+
+def test_next_types_to_try_after_actif():
+    from app.services.financial_page_classifier import next_types_to_try
+
+    order = next_types_to_try(
+        primary="BILAN_ACTIF",
+        previous_page_type="BILAN_ACTIF",
+    )
+    assert order[0] == "BILAN_ACTIF"
+    assert "BILAN_PASSIF" in order[:3]
+    assert "CPC" in order[:4]
