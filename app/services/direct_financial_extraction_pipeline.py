@@ -43,6 +43,7 @@ from app.services.direct_glm_financial_client import (
     extract_financial_page,
     prompt_for_page_type,
     schema_for_page_type,
+    warmup_direct_financial_model,
 )
 from app.services.financial_controls import (
     invalidate_conflicting_fields,
@@ -242,6 +243,9 @@ async def analyze_financial_document(
     validate_pdf(pdf_bytes)
     _emit("pdf_validated", {"filename": filename})
 
+    # Évite les 504 NiceGPU / cold-start avant la 1ʳᵉ page
+    await warmup_direct_financial_model()
+
     pages_total = count_pdf_pages(pdf_bytes)
     limit = min(max_pages or DIRECT_FINANCIAL_MAX_PAGES, pages_total, DIRECT_FINANCIAL_MAX_PAGES)
     _emit("job_started", {"pages_total": pages_total, "pages_limit": limit})
@@ -277,6 +281,15 @@ async def analyze_financial_document(
             image_bytes=oriented,
             native_text=rendered_page.native_text,
             previous_page_type=previous_type,
+            use_glm_fallback=True,
+        )
+        logger.info(
+            "Page %d classifiée=%s orientation=%s native_chars=%d image_bytes=%d",
+            page_no,
+            page_type,
+            orientation,
+            len(rendered_page.native_text or ""),
+            len(oriented),
         )
         _emit(
             "page_classified",

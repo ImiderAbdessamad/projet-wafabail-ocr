@@ -47,12 +47,47 @@ def test_identification():
 
 
 def test_blank_becomes_vide():
-    assert asyncio.run(classify_financial_page(native_text="   ")) == "VIDE"
+    assert (
+        asyncio.run(
+            classify_financial_page(native_text="   ", use_glm_fallback=False)
+        )
+        == "VIDE"
+    )
+
+
+def test_scanned_nonblank_image_not_auto_vide():
+    """Sans texte natif, une image non blanche ne doit pas être VIDE d'emblée."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from app.services.financial_page_classifier import is_mostly_blank_image
+
+    img = Image.new("RGB", (400, 500), "white")
+    draw = ImageDraw.Draw(img)
+    for y in range(40, 460, 20):
+        draw.line((30, y, 370, y), fill="black", width=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+    assert is_mostly_blank_image(data) is False
+
+    # Sans GLM : AUTRE (pas VIDE) pour laisser une chance au pipeline
+    result = asyncio.run(
+        classify_financial_page(
+            image_bytes=data,
+            native_text="",
+            use_glm_fallback=False,
+        )
+    )
+    assert result != "VIDE"
 
 
 def test_admin_page_autre():
     text = "Formulaire de déclaration fiscale administrative numéro 12345 sans bilan"
-    result = asyncio.run(classify_financial_page(native_text=text))
+    result = asyncio.run(
+        classify_financial_page(native_text=text, use_glm_fallback=False)
+    )
     assert result in {"AUTRE", "VIDE", "IDENTIFICATION"}
 
 

@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
+import re
 import time
 from typing import Type
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.config import (
     DIRECT_FINANCIAL_KEEP_ALIVE,
@@ -19,9 +21,14 @@ from app.config import (
     DIRECT_FINANCIAL_TIMEOUT_SECONDS,
     OLLAMA_URL,
 )
-from app.schemas.direct_financial_extraction import PAGE_TYPE_SCHEMAS
+from app.schemas.direct_financial_extraction import (
+    PAGE_TYPE_SCHEMAS,
+    FinancialPageType,
+)
 
 logger = logging.getLogger(__name__)
+
+_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
 class DirectFinancialExtractionError(RuntimeError):
@@ -30,6 +37,12 @@ class DirectFinancialExtractionError(RuntimeError):
 
 class DirectFinancialLengthError(DirectFinancialExtractionError):
     pass
+
+
+class _PageTypeClassification(BaseModel):
+    page_type: FinancialPageType
+    confidence: float = Field(ge=0.0, le=1.0, default=0.5)
+    reason: str = Field(default="", max_length=120)
 
 
 _COMMON_SYSTEM_PROMPT = """
@@ -129,6 +142,162 @@ def prompt_for_page_type(page_type: str) -> str:
     return f"{_COMMON_SYSTEM_PROMPT}\n\nRègles {page_type} :\n{rules}"
 
 
+def _clean_model_json(raw: str) -> str:
+    text = str(raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    if not text.startswith("{"):
+        match = _JSON_BLOCK_RE.search(text)
+        if match:
+            text = match.group(0)
+    return text.strip()
+
+
+def _validate_content(content: str, schema_model: type[BaseModel]) -> BaseModel:
+    cleaned = _clean_model_json(content)
+    if not cleaned:
+        raise DirectFinancialExtractionError("Réponse GLM vide.")
+    try:
+        return schema_model.model_validate_json(cleaned)
+    except ValidationError:
+        try:
+            data = json.loads(cleaned)
+            return schema_model.model_validate(data)
+        except Exception as exc:  # noqa: BLE001
+            raise DirectFinancialExtractionError(
+                "La réponse GLM ne respecte pas le JSON Schema."
+            ) from exc
+
+
+def _http_timeout() -> httpx.Timeout:
+    read = float(DIRECT_FINANCIAL_TIMEOUT_SECONDS)
+    return httpx.Timeout(
+        connect=30.0,
+        read=read,
+        write=max(read, 180.0),
+        pool=30.0,
+    )
+
+
+def _downscale_for_classify(image_bytes: bytes, max_side: int = 960) -> bytes:
+    """Image plus légère pour la classification (évite 504 gateway)."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        img = img.convert("RGB")
+        img.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=75)
+        return out.getvalue()
+
+
+async def warmup_direct_financial_model() -> None:
+    """Préchauffe le modèle GLM pour éviter les 504 de cold-start."""
+    payload = {
+        "model": DIRECT_FINANCIAL_MODEL,
+        "messages": [{"role": "user", "content": "ping"}],
+        "stream": False,
+        "keep_alive": DIRECT_FINANCIAL_KEEP_ALIVE,
+        "options": {"temperature": 0, "num_predict": 1},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=_http_timeout()) as client:
+            response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+        logger.info(
+            "Warmup GLM direct status=%s model=%s",
+            response.status_code,
+            DIRECT_FINANCIAL_MODEL,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Warmup GLM direct échoué (non bloquant) : %s", exc)
+
+
+async def classify_page_with_glm(image_bytes: bytes) -> FinancialPageType:
+    """Mini-appel GLM pour classer une page scannée sans texte natif."""
+    light = _downscale_for_classify(image_bytes)
+    encoded = base64.b64encode(light).decode("ascii")
+    schema = _PageTypeClassification.model_json_schema()
+    payload = {
+        "model": DIRECT_FINANCIAL_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Tu classifies une page de liasse fiscale marocaine PCGM. "
+                    "Choisis exactement un page_type parmi : "
+                    "IDENTIFICATION, BILAN_ACTIF, BILAN_PASSIF, CPC, "
+                    "RESULTAT_FISCAL, ESG, DETAIL_CPC, AUTRE, VIDE. "
+                    "VIDE = page blanche. AUTRE = admin/annexe non financière. "
+                    "Réponds uniquement en JSON."
+                ),
+            },
+            {
+                "role": "user",
+                "content": "Quel est le type de cette page ?",
+                "images": [encoded],
+            },
+        ],
+        "format": schema,
+        "stream": False,
+        "keep_alive": DIRECT_FINANCIAL_KEEP_ALIVE,
+        "options": {
+            "temperature": 0,
+            "num_ctx": min(DIRECT_FINANCIAL_NUM_CTX, 4096),
+            "num_predict": 128,
+        },
+    }
+
+    last_error: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            async with httpx.AsyncClient(timeout=_http_timeout()) as client:
+                response = await client.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json=payload,
+                )
+
+            if response.status_code in {500, 502, 503, 504}:
+                last_error = DirectFinancialExtractionError(
+                    f"Classification GLM HTTP {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+                logger.warning(
+                    "Classif GLM tentative %d/3 : %s",
+                    attempt,
+                    last_error,
+                )
+                await asyncio.sleep(min(3 * attempt, 10))
+                continue
+
+            if response.status_code >= 400:
+                raise DirectFinancialExtractionError(
+                    f"Classification GLM HTTP {response.status_code}: "
+                    f"{response.text[:200]}"
+                )
+
+            body = response.json()
+            content = ((body.get("message") or {}).get("content") or "").strip()
+            parsed = _validate_content(content, _PageTypeClassification)
+            return parsed.page_type  # type: ignore[return-value]
+        except DirectFinancialExtractionError as exc:
+            last_error = exc
+            await asyncio.sleep(min(3 * attempt, 10))
+        except httpx.HTTPError as exc:
+            last_error = DirectFinancialExtractionError(str(exc))
+            await asyncio.sleep(min(3 * attempt, 10))
+
+    raise DirectFinancialExtractionError(
+        f"Classification GLM impossible : {last_error}"
+    )
+
+
 async def extract_financial_page(
     image_bytes: bytes,
     *,
@@ -144,16 +313,12 @@ async def extract_financial_page(
     used_prompt = system_prompt or prompt_for_page_type(page_type)
     attempts = max_attempts or DIRECT_FINANCIAL_MAX_ATTEMPTS
     encoded = base64.b64encode(image_bytes).decode("ascii")
-
-    timeout = httpx.Timeout(
-        connect=30.0,
-        read=float(DIRECT_FINANCIAL_TIMEOUT_SECONDS),
-        write=60.0,
-        pool=30.0,
-    )
+    timeout = _http_timeout()
 
     last_error: Exception | None = None
     for attempt in range(1, attempts + 1):
+        # Tentative 1 : JSON Schema Pydantic ; tentative suivante : format json simple
+        use_full_schema = attempt == 1
         payload = {
             "model": DIRECT_FINANCIAL_MODEL,
             "messages": [
@@ -164,14 +329,16 @@ async def extract_financial_page(
                         f"Page {page_number}. Type imposé : {page_type}. "
                         f"Orientation : {orientation}°. "
                         "Extrais uniquement les champs autorisés. "
-                        "Ne retourne aucun candidat sans montant visible."
+                        "Ne retourne aucun candidat sans montant visible. "
+                        "Réponds uniquement en JSON valide."
                     ),
                     "images": [encoded],
                 },
             ],
-            "format": used_schema.model_json_schema(),
+            "format": (
+                used_schema.model_json_schema() if use_full_schema else "json"
+            ),
             "stream": False,
-            "think": False,
             "keep_alive": DIRECT_FINANCIAL_KEEP_ALIVE,
             "options": {
                 "temperature": 0,
@@ -190,7 +357,12 @@ async def extract_financial_page(
 
             if response.status_code in {500, 502, 503, 504}:
                 raise DirectFinancialExtractionError(
-                    f"Ollama HTTP {response.status_code}"
+                    f"Ollama HTTP {response.status_code}: {response.text[:180]}"
+                )
+            # Les 504 gateway sont retryables (déjà couverts ci-dessus).
+            if response.status_code == 404:
+                raise DirectFinancialExtractionError(
+                    f"Modèle '{DIRECT_FINANCIAL_MODEL}' introuvable sur Ollama."
                 )
             response.raise_for_status()
             body = response.json()
@@ -220,26 +392,15 @@ async def extract_financial_page(
             ).strip()
             thinking = (body.get("message") or {}).get("thinking") or ""
             logger.info(
-                "GLM response chars=%d thinking_chars=%d",
+                "GLM response chars=%d thinking_chars=%d preview=%r",
                 len(content),
                 len(str(thinking)),
+                content[:160],
             )
             if not content:
                 raise DirectFinancialExtractionError("Réponse GLM vide.")
 
-            try:
-                result = used_schema.model_validate_json(content)
-            except ValidationError as exc:
-                logger.warning(
-                    "JSON GLM invalide page=%d type=%s: %s",
-                    page_number,
-                    page_type,
-                    content[:500],
-                )
-                raise DirectFinancialExtractionError(
-                    "La réponse GLM ne respecte pas le JSON Schema."
-                ) from exc
-
+            result = _validate_content(content, used_schema)
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             return result, elapsed_ms
 
@@ -251,7 +412,10 @@ async def extract_financial_page(
             last_error = exc
 
         logger.warning(
-            "GLM direct échec page=%d type=%s tentative=%d/%d : %s",
+            (
+                "GLM direct échec page=%d type=%s "
+                "tentative=%d/%d : %s"
+            ),
             page_number,
             page_type,
             attempt,

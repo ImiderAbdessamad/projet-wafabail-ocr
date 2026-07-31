@@ -172,7 +172,7 @@ def test_extract_financial_page_payload():
     payload = captured["payload"]
     assert payload["model"] == DIRECT_FINANCIAL_MODEL
     assert payload["stream"] is False
-    assert payload["think"] is False
+    assert "think" not in payload  # aligné sur vision_client CIN/ICE
     assert payload["options"]["temperature"] == 0
     assert "images" in payload["messages"][1]
     assert isinstance(payload["format"], dict)
