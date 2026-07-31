@@ -282,6 +282,7 @@ async def analyze_financial_document(
             native_text=rendered_page.native_text,
             previous_page_type=previous_type,
             use_glm_fallback=True,
+            page_number=page_no,
         )
         logger.info(
             "Page %d classifiée=%s orientation=%s native_chars=%d image_bytes=%d",
@@ -438,7 +439,19 @@ async def analyze_financial_document(
 
         all_candidates.extend(page_candidates)
         pages_processed += 1
-        previous_type = page_type
+        # Ne propager que les types multi-pages financiers.
+        # IDENTIFICATION ne doit jamais « contaminer » les pages suivantes.
+        if page_type in {
+            "BILAN_ACTIF",
+            "BILAN_PASSIF",
+            "CPC",
+            "DETAIL_CPC",
+            "RESULTAT_FISCAL",
+            "ESG",
+        }:
+            previous_type = page_type
+        elif page_type == "IDENTIFICATION":
+            previous_type = "IDENTIFICATION"
         page_audit.append(
             FinancialPageAudit(
                 page_number=page_no,

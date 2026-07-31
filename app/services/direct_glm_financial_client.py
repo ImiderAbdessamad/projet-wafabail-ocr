@@ -219,28 +219,56 @@ async def warmup_direct_financial_model() -> None:
         logger.warning("Warmup GLM direct échoué (non bloquant) : %s", exc)
 
 
-async def classify_page_with_glm(image_bytes: bytes) -> FinancialPageType:
+async def classify_page_with_glm(
+    image_bytes: bytes,
+    *,
+    discourage_identification: bool = False,
+    force_financial_hint: bool = False,
+) -> FinancialPageType:
     """Mini-appel GLM pour classer une page scannée sans texte natif."""
     light = _downscale_for_classify(image_bytes)
     encoded = base64.b64encode(light).decode("ascii")
     schema = _PageTypeClassification.model_json_schema()
+
+    system = (
+        "Tu classifies une page de liasse fiscale marocaine PCGM. "
+        "Choisis exactement un page_type parmi : "
+        "IDENTIFICATION, BILAN_ACTIF, BILAN_PASSIF, CPC, "
+        "RESULTAT_FISCAL, ESG, DETAIL_CPC, AUTRE, VIDE.\n"
+        "Règles visuelles :\n"
+        "- Tableau Brut / Amortissements / Net → BILAN_ACTIF\n"
+        "- Capitaux propres / Dettes de financement / Passif circulant "
+        "→ BILAN_PASSIF\n"
+        "- Compte de produits et charges / Chiffre d'affaires → CPC\n"
+        "- Détail des postes du CPC / Redevances → DETAIL_CPC\n"
+        "- Passage résultat comptable → fiscal → RESULTAT_FISCAL\n"
+        "- État des soldes de gestion / CAF → ESG\n"
+        "- IDENTIFICATION uniquement si page d'identité du contribuable "
+        "(raison sociale, IF, ICE) SANS grand tableau financier\n"
+        "- VIDE = page blanche ; AUTRE = annexe admin non financière\n"
+        "Réponds uniquement en JSON."
+    )
+    user = "Quel est le type de cette page ?"
+    if discourage_identification:
+        user += (
+            " Attention : la page précédente était déjà IDENTIFICATION. "
+            "N'utilise IDENTIFICATION que si c'est vraiment encore la page "
+            "d'identité. Si tu vois un tableau financier, choisis BILAN_ACTIF, "
+            "BILAN_PASSIF, CPC, DETAIL_CPC, RESULTAT_FISCAL ou ESG."
+        )
+    if force_financial_hint:
+        user += (
+            " Cette page contient très probablement un état financier "
+            "(bilan ou CPC). Ne réponds PAS IDENTIFICATION."
+        )
+
     payload = {
         "model": DIRECT_FINANCIAL_MODEL,
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "Tu classifies une page de liasse fiscale marocaine PCGM. "
-                    "Choisis exactement un page_type parmi : "
-                    "IDENTIFICATION, BILAN_ACTIF, BILAN_PASSIF, CPC, "
-                    "RESULTAT_FISCAL, ESG, DETAIL_CPC, AUTRE, VIDE. "
-                    "VIDE = page blanche. AUTRE = admin/annexe non financière. "
-                    "Réponds uniquement en JSON."
-                ),
-            },
+            {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": "Quel est le type de cette page ?",
+                "content": user,
                 "images": [encoded],
             },
         ],

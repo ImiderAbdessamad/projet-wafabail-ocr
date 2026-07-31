@@ -12,6 +12,8 @@ from app.schemas.direct_financial_extraction import FinancialPageType
 
 logger = logging.getLogger(__name__)
 
+# IDENTIFICATION ne se poursuit JAMAIS sur les pages suivantes :
+# sinon tout un PDF scanné reste collé en IDENTIFICATION (bug SERDILAB).
 _EXTRACTABLE_CONTINUATION: set[str] = {
     "BILAN_ACTIF",
     "BILAN_PASSIF",
@@ -19,7 +21,6 @@ _EXTRACTABLE_CONTINUATION: set[str] = {
     "DETAIL_CPC",
     "RESULTAT_FISCAL",
     "ESG",
-    "IDENTIFICATION",
 }
 
 _CONTINUATION: dict[str, tuple[str, ...]] = {
@@ -225,14 +226,46 @@ def classify_blank_or_other(
     return "VIDE"
 
 
+def _has_strong_identification_markers(native_text: str | None) -> bool:
+    folded = _fold(native_text or "")
+    return any(
+        m in folded
+        for m in (
+            "identification du contribuable",
+            "pieces annexes a la declaration",
+        )
+    )
+
+
+def _has_financial_markers(native_text: str | None) -> bool:
+    folded = _fold(native_text or "")
+    return any(
+        m in folded
+        for m in (
+            "bilan actif",
+            "bilan passif",
+            "immobilisation",
+            "capitaux propres",
+            "compte de produits",
+            "chiffre d affaires",
+            "detail des postes",
+            "tresorerie actif",
+            "tresorerie passif",
+            "total general",
+            "dettes de financement",
+        )
+    )
+
+
 async def classify_financial_page(
     *,
     image_bytes: bytes | None = None,
     native_text: str | None = None,
     previous_page_type: FinancialPageType | None = None,
     use_glm_fallback: bool = True,
+    page_number: int | None = None,
 ) -> FinancialPageType:
-    """Classifie une page : texte → image → continuation → GLM."""
+    """Classifie une page : texte → continuation financière → GLM."""
     folded = _fold(native_text or "")
     blank = is_mostly_blank_image(image_bytes) if image_bytes else (len(folded) < 12)
 
@@ -244,9 +277,20 @@ async def classify_financial_page(
         previous_page_type=previous_page_type,
     )
     if lexical is not None:
-        return lexical
+        # Ne pas accepter IDENTIFICATION lexical faible après page 1
+        if lexical == "IDENTIFICATION" and page_number and page_number >= 2:
+            if not _has_strong_identification_markers(native_text):
+                lexical = None
+        if lexical == "IDENTIFICATION" and _has_financial_markers(native_text):
+            # Priorité aux marqueurs financiers si les deux coexistent
+            financial = classify_from_text(native_text)
+            if financial and financial != "IDENTIFICATION":
+                return financial
+        if lexical is not None:
+            return lexical
 
-    # Suite multi-pages scannées : peu de texte, page précédente financière
+    # Suite multi-pages scannées : uniquement sections financières tabulaires.
+    # Jamais IDENTIFICATION (sinon toutes les pages restent bloquées en ID).
     if (
         previous_page_type in _EXTRACTABLE_CONTINUATION
         and image_bytes
@@ -267,10 +311,48 @@ async def classify_financial_page(
         from app.services.direct_glm_financial_client import classify_page_with_glm
 
         try:
-            page_type = await classify_page_with_glm(image_bytes)
-            logger.info("Classification GLM → %s", page_type)
+            discourage_id = previous_page_type == "IDENTIFICATION" or (
+                page_number is not None and page_number >= 2
+            )
+            page_type = await classify_page_with_glm(
+                image_bytes,
+                discourage_identification=discourage_id,
+            )
+
+            # Si GLM répète IDENTIFICATION sans marqueurs ID → 2ᵉ passe financière
+            if (
+                page_type == "IDENTIFICATION"
+                and discourage_id
+                and not _has_strong_identification_markers(native_text)
+            ):
+                page_type = await classify_page_with_glm(
+                    image_bytes,
+                    discourage_identification=True,
+                    force_financial_hint=True,
+                )
+                if page_type == "IDENTIFICATION":
+                    # Dernier recours : première page financière typique après ID
+                    logger.warning(
+                        "GLM insiste IDENTIFICATION page=%s — fallback BILAN_ACTIF",
+                        page_number,
+                    )
+                    page_type = "BILAN_ACTIF"
+
+            logger.info(
+                "Classification GLM page=%s → %s (prev=%s)",
+                page_number,
+                page_type,
+                previous_page_type,
+            )
             return page_type
         except Exception as exc:  # noqa: BLE001
             logger.warning("Classification GLM échouée : %s", exc)
+            # Après ID, ne pas abandonner en AUTRE (qui skip) : tenter bilan actif
+            if previous_page_type == "IDENTIFICATION" and not blank:
+                logger.warning(
+                    "Fallback BILAN_ACTIF page=%s après échec classif GLM",
+                    page_number,
+                )
+                return "BILAN_ACTIF"
 
     return classify_blank_or_other(native_text, image_bytes=image_bytes)

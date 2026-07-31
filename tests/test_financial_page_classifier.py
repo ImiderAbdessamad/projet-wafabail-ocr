@@ -97,3 +97,34 @@ def test_continuation_cpc():
         classify_from_text(text, previous_page_type="CPC") == "CPC"
         or classify_from_text(text) == "CPC"
     )
+
+
+def test_identification_does_not_continue_on_scanned_pages():
+    """Bug SERDILAB : page 1 ID ne doit pas forcer les pages 2..N en IDENTIFICATION."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from app.services.financial_page_classifier import _EXTRACTABLE_CONTINUATION
+
+    assert "IDENTIFICATION" not in _EXTRACTABLE_CONTINUATION
+
+    img = Image.new("RGB", (400, 500), "white")
+    draw = ImageDraw.Draw(img)
+    for y in range(40, 460, 20):
+        draw.line((30, y, 370, y), fill="black", width=2)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+
+    # Sans GLM : pas de continuation auto depuis IDENTIFICATION
+    result = asyncio.run(
+        classify_financial_page(
+            image_bytes=data,
+            native_text="",
+            previous_page_type="IDENTIFICATION",
+            use_glm_fallback=False,
+            page_number=2,
+        )
+    )
+    assert result != "IDENTIFICATION"
