@@ -335,10 +335,11 @@ _FOCUSED_PROMPTS: dict[str, str] = {
         "raw_label = texte de la ligne, pas le montant."
     ),
     "CPC": (
-        "Extrais UNIQUEMENT : Chiffre d'affaires → CHIFFRE_AFFAIRES, "
+        "Extrais UNIQUEMENT : Chiffre d'affaires OU "
+        "'Ventes de biens et services produits' → CHIFFRE_AFFAIRES, "
         "Résultat net (XIII ou XVI) → RESULTAT_NET_XVI, "
         "Charges financières / TOTAL V → CHARGES_FINANCIERES, "
-        "Résultat d'exploitation → RESULTAT_EXPLOITATION. "
+        "Résultat d'exploitation (pas Produits) → RESULTAT_EXPLOITATION. "
         "raw_label = texte de la ligne."
     ),
 }
@@ -814,12 +815,15 @@ async def analyze_financial_document(
     behavioral_axis, behavioral_blocking = calculate_behavioral_score(None)
     sector_axis = calculate_sector_score(ratios, None)
     axes = [financial_axis, behavioral_axis, sector_axis]
-    final_score, final_blocking = calculate_final_score(axes)
+    # Liasse seule : score financier provisoire si axe financial OK
+    final_score, final_blocking, soft_warnings = calculate_final_score(
+        axes,
+        allow_partial_axes=True,
+    )
 
     blocking: list[str] = []
     blocking.extend(financial_axis.blocking_reasons)
-    blocking.extend(behavioral_blocking)
-    blocking.extend(sector_axis.blocking_reasons)
+    # Ne pas durcir behavioral/sector absents — déjà en soft_warnings
     blocking.extend(final_blocking)
     # Contrôles failed bloquent STRICT
     if scoring_mode.upper() == "STRICT":
@@ -827,10 +831,12 @@ async def analyze_financial_document(
             if check.status == "failed":
                 blocking.append(f"Contrôle comptable échoué : {check.code}")
     blocking = list(dict.fromkeys(blocking))
+    soft = list(dict.fromkeys(soft_warnings + behavioral_blocking + sector_axis.blocking_reasons))
 
     decision: CreditDecision = build_credit_decision(
         final_score,
         blocking_reasons=blocking,
+        soft_warnings=soft,
     )
 
     batch = DirectFinancialExtractionBatch(

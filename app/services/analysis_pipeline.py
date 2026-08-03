@@ -62,18 +62,30 @@ async def analyze_extracted_pdf(
     sector_axis = calculate_sector_score(ratios, sector_input)
 
     axes = [financial_axis, behavioral_axis, sector_axis]
-    final_score, final_score_blocking = calculate_final_score(axes)
+    # Si behavioral/sector fournis → scoring complet ; sinon provisoire
+    allow_partial = behavioral_input is None or sector_input is None
+    final_score, final_score_blocking, soft_warnings = calculate_final_score(
+        axes,
+        allow_partial_axes=allow_partial,
+    )
 
     blocking_reasons: list[str] = []
     blocking_reasons.extend(financial_axis.blocking_reasons)
-    blocking_reasons.extend(behavioral_blocking)
-    blocking_reasons.extend(sector_axis.blocking_reasons)
+    if not allow_partial:
+        blocking_reasons.extend(behavioral_blocking)
+        blocking_reasons.extend(sector_axis.blocking_reasons)
     blocking_reasons.extend(final_score_blocking)
     blocking_reasons = list(dict.fromkeys(blocking_reasons))
+    soft = list(dict.fromkeys(soft_warnings))
+    if allow_partial:
+        soft.extend(behavioral_blocking)
+        soft.extend(sector_axis.blocking_reasons)
+        soft = list(dict.fromkeys(soft))
 
     decision = build_credit_decision(
         final_score,
         blocking_reasons=blocking_reasons,
+        soft_warnings=soft,
     )
 
     if scoring_mode.upper() == "REVIEW" and final_score is not None and blocking_reasons:

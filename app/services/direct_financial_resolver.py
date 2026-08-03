@@ -239,15 +239,36 @@ def repair_direct_candidates(
     return [repair_direct_candidate(c) for c in candidates]
 
 
+_ESG_KEEP_AS_CPC = frozenset(
+    {
+        "CHIFFRE_AFFAIRES",
+        "RESULTAT_EXPLOITATION",
+        "RESULTAT_COURANT",
+        "RESULTAT_NET",
+        "RESULTAT_NET_XIII",
+        "RESULTAT_NET_XVI",
+        "ACHATS_CONSOMMES",
+        "ACHATS_REVENDUS",
+        "DOTATIONS_AMORTISSEMENTS",
+        "CHARGES_FINANCIERES",
+        "PRODUITS_EXPLOITATION",
+        "CHARGES_EXPLOITATION",
+    }
+)
+
+
 def to_mapping_candidate(candidate: DirectFinancialCandidate) -> FinancialCandidate | None:
     """Convertit un candidat GLM direct vers le type interne commun."""
     page_type = candidate.evidence.page_type
-    if page_type in {"AUTRE", "VIDE", "ESG"}:
-        # ESG : on conserve CAF si présent via RESULTAT_FISCAL/AUTRE mapping
-        if page_type == "ESG" and candidate.field_code == "CAF":
-            section = "RESULTAT_FISCAL"
-        elif page_type == "ESG":
-            return None
+    if page_type in {"AUTRE", "VIDE"}:
+        return None
+    if page_type == "ESG":
+        # ESG / soldes de gestion : lignes CPC utiles + CAF
+        if candidate.field_code in _ESG_KEEP_AS_CPC:
+            section = "CPC"
+        elif candidate.field_code == "CAF":
+            # CAF ESG → conservée via section CPC (allowed via remap nature)
+            section = "CPC"
         else:
             return None
     else:

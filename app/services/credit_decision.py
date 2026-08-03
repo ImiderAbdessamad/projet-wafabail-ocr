@@ -9,36 +9,58 @@ from app.schemas.financial_analysis import AxisScore, CreditDecision, DecisionCl
 
 def calculate_final_score(
     axes: list[AxisScore],
-) -> tuple[Decimal | None, list[str]]:
+    *,
+    allow_partial_axes: bool = False,
+) -> tuple[Decimal | None, list[str], list[str]]:
+    """Retourne (score, hard_blocking, soft_warnings).
+
+    soft_warnings = axes comportemental/sector manquants (liasse seule).
+    """
     by_code = {a.code: a for a in axes}
     financial = by_code.get("financial")
     behavioral = by_code.get("behavioral")
     sector = by_code.get("sector")
-    blocking: list[str] = []
+    hard: list[str] = []
+    soft: list[str] = []
 
-    for axis in (financial, behavioral, sector):
+    if financial is None or not financial.calculable:
+        hard.append(
+            f"Axe {financial.code if financial else 'financial'} non calculable."
+        )
+
+    for axis, label in (
+        (behavioral, "behavioral"),
+        (sector, "sector"),
+    ):
         if axis is None or not axis.calculable:
-            blocking.append(
-                f"Axe {axis.code if axis else '?'} non calculable."
-            )
+            msg = f"Axe {axis.code if axis else label} non calculable."
+            if allow_partial_axes:
+                soft.append(msg)
+            else:
+                hard.append(msg)
 
-    if blocking:
-        return None, blocking
+    if hard:
+        return None, hard, soft
 
-    assert financial and behavioral and sector
+    assert financial is not None
+    available = [a for a in (financial, behavioral, sector) if a is not None and a.calculable]
+    weight_sum = sum((a.weight for a in available), Decimal("0"))
+    if weight_sum <= 0:
+        return None, ["Pondération d'axes invalide."], soft
+
     final = (
-        financial.raw_score * AXIS_WEIGHTS["financial"]
-        + behavioral.raw_score * AXIS_WEIGHTS["behavioral"]
-        + sector.raw_score * AXIS_WEIGHTS["sector"]
+        sum((a.raw_score * a.weight for a in available), Decimal("0")) / weight_sum
     ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return final, []
+    return final, [], soft
 
 
 def build_credit_decision(
     final_score: Decimal | None,
     *,
     blocking_reasons: list[str],
+    soft_warnings: list[str] | None = None,
 ) -> CreditDecision:
+    soft_warnings = list(soft_warnings or [])
     if blocking_reasons:
         # Critères bloquants : jamais d'accord automatique
         severe = any(
@@ -95,11 +117,20 @@ def build_credit_decision(
         risk_class, profile = "D/F", "Risqué"
         decision, recommendation = "Refus recommandé", "Profil risqué."
 
+    blocking_status = None
+    if soft_warnings:
+        # Score financier provisoire — axes externes absents → revue
+        decision = "Revue manuelle (score financier provisoire)"
+        recommendation = (
+            f"{recommendation} " + "; ".join(soft_warnings[:3])
+        ).strip()
+        blocking_status = "PARTIAL_DATA"
+
     return CreditDecision(
         score=score,
         risk_class=risk_class,
         profile=profile,
         decision=decision,
         recommendation=recommendation,
-        blocking_status=None,
+        blocking_status=blocking_status,
     )

@@ -208,6 +208,120 @@ def test_actif_passif_control_and_dataset():
     assert dataset.tresorerie_nette.value == Decimal("201167.82")
 
 
+def test_resultat_exploitation_rejects_outlier_vs_resultat_courant():
+    """SERDILAB : RE ~12 M incohérent avec RC ~1,2 M."""
+    cands = [
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "13.404.177,00",
+            page_type="CPC",
+            label="Chiffres d'affaires",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "RESULTAT_COURANT",
+            "1.187.736,60",
+            page_type="CPC",
+            label="RESULTAT COURANT (III - VI)",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "RESULTAT_EXPLOITATION",
+            "12.022.593,73",
+            page_type="CPC",
+            label="Résultat d'exploitation (1 - II)",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["RESULTAT_EXPLOITATION"].value is None
+    assert resolved["RESULTAT_EXPLOITATION"].status == "missing"
+
+
+def test_resultat_exploitation_prefers_primary_cpc_page():
+    """DMT : 1ʳᵉ page CPC « Résultat d'exploitation » prime sur ESG VI."""
+    cands = [
+        _c(
+            "RESULTAT_EXPLOITATION",
+            "89 598,00",
+            page_type="CPC",
+            label="Résultat d'exploitation",
+            role="TOTAL_EXERCICE_N",
+            page=5,
+        ),
+        _c(
+            "RESULTAT_EXPLOITATION",
+            "85 958,00",
+            page_type="CPC",
+            label="VI. (+/-) RESULTAT D'EXPLOITATION",
+            role="TOTAL_EXERCICE_N",
+            page=9,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["RESULTAT_EXPLOITATION"].value == Decimal("89598.00")
+    assert resolved["RESULTAT_EXPLOITATION"].status == "confirmed"
+
+
+def test_ca_from_ventes_de_marchandises():
+    """DMT : CA souvent porté par ventes de marchandises."""
+    cands = [
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "4 746 419,00",
+            page_type="CPC",
+            label="Ventes de marchandises (en l'état)",
+            role="TOTAL_EXERCICE_N",
+            page=5,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["CHIFFRE_AFFAIRES"].value == Decimal("4746419.00")
+
+
+def test_ca_accepts_ventes_de_services():
+    cands = [
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "1 250 000,00",
+            page_type="CPC",
+            label="Ventes de biens et services produits",
+            role="TOTAL_EXERCICE_N",
+            page=5,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["CHIFFRE_AFFAIRES"].value == Decimal("1250000.00")
+
+
+def test_deductions_rejects_bare_total():
+    cands = [
+        _c(
+            "DEDUCTIONS",
+            "85 958,00",
+            page_type="RESULTAT_FISCAL",
+            label="Total",
+            role="NET_N",
+            page=8,
+        ),
+        _c(
+            "DEDUCTIONS",
+            "0,00",
+            page_type="RESULTAT_FISCAL",
+            label="DEDUCTIONS FISCALES",
+            role="NET_N",
+            page=8,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved.get("DEDUCTIONS") is None or resolved["DEDUCTIONS"].value == Decimal(
+        "0.00"
+    )
+
+
 def test_achats_revendus_prefers_explicit_label():
     """Page CPC principale gagne face à « ACHATS de marchandises » annexe."""
     cands = [

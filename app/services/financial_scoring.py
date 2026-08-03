@@ -43,9 +43,27 @@ def calculate_financial_score(
         if fv is None or fv.status not in USABLE_FIELD_STATUSES or fv.value is None:
             blocking.append(f"Champ essentiel manquant ou non fiable : {field_name}")
 
+    # Seuls les conflits sur champs essentiels bloquent le scoring.
+    # RESULTAT_EXPLOITATION conflicting ne doit pas invalider l'axe financier.
+    essential_codes = {
+        "CHIFFRE_AFFAIRES",
+        "RESULTAT_NET",
+        "TOTAL_BILAN",
+        "FONDS_PROPRES",
+        "chiffre_affaires",
+        "resultat_net",
+        "total_bilan",
+        "fonds_propres",
+    }
     for check_warning in dataset.warnings:
-        if "invalidé" in check_warning.lower() or "conflicting" in check_warning.lower():
+        lowered = check_warning.lower()
+        if "invalidé" in lowered:
             blocking.append(check_warning)
+            continue
+        if "conflicting" in lowered:
+            token = check_warning.split()[0] if check_warning.split() else ""
+            if token in essential_codes or token.lower() in essential_codes:
+                blocking.append(check_warning)
 
     weighted_ratios = [r for r in ratios if r.code in FINANCIAL_RATIO_RULES]
     total_max = sum(

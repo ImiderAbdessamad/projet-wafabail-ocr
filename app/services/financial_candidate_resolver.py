@@ -83,6 +83,7 @@ ALLOWED_FIELDS_BY_SECTION: dict[str, set[str]] = {
         "DOTATIONS_AMORTISSEMENTS",
         "PRODUITS_CESSION_IMMOBILISATIONS",
         "VALEUR_NETTE_IMMOBILISATIONS_CEDEES",
+        "CAF",
     },
     "DETAIL_CPC": {
         "REDEVANCES_CREDIT_BAIL",
@@ -254,6 +255,23 @@ def _fold(text: str) -> str:
     normalized = normalize_label(text or "")
     decomposed = unicodedata.normalize("NFKD", normalized)
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+
+
+def _is_chiffre_affaires_label(label: str) -> bool:
+    """CA explicite, ventes de services, ou ventes de marchandises (négoce)."""
+    folded = _fold(label)
+    if "achat" in folded:
+        return False
+    if "chiffre" in folded and "affaires" in folded:
+        return True
+    if "ventes de biens et services" in folded:
+        return True
+    if "ventes de services" in folded:
+        return True
+    # CPC négoce : souvent la seule ligne chiffrée avant « Chiffres d'affaires »
+    if "ventes de marchandises" in folded:
+        return True
+    return False
 
 
 def clean_qwen_marker(text: str) -> str:
@@ -511,11 +529,17 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
     if field_code == "CHIFFRE_AFFAIRES":
         if section != "CPC":
             reasons.append("CHIFFRE_AFFAIRES hors CPC.")
-        # « Chiffre(s) d'affaires » ; pas Achats / Total générique
-        if not ("chiffre" in label and "affaires" in label):
-            reasons.append("CHIFFRE_AFFAIRES exige un libellé Chiffre d'affaires.")
         if "achat" in label:
             reasons.append("Ligne d'achats refusée comme CHIFFRE_AFFAIRES.")
+        elif not _is_chiffre_affaires_label(label):
+            reasons.append(
+                "CHIFFRE_AFFAIRES exige Chiffre d'affaires ou "
+                "Ventes de biens et services."
+            )
+
+    if field_code == "DEDUCTIONS":
+        if "deduct" not in label:
+            reasons.append("DEDUCTIONS exige un libellé de déductions fiscales.")
 
     if field_code == "ACHATS_REVENDUS":
         if section not in {"CPC", "DETAIL_CPC"}:
@@ -1040,6 +1064,116 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
     return None
 
 
+def _resolve_resultat_exploitation(
+    grouped: dict[str, list[FinancialCandidate]],
+) -> FinancialValue | None:
+    """Préfère la ligne ESG/VI et rejette les montants incohérents vs CA / RC."""
+    candidates = list(grouped.get("RESULTAT_EXPLOITATION", []))
+    if not candidates:
+        return _financial_value("RESULTAT_EXPLOITATION", None, "missing", [])
+
+    ca_amount: Decimal | None = None
+    for c in grouped.get("CHIFFRE_AFFAIRES", []):
+        if not _is_chiffre_affaires_label(c.evidence.raw_label):
+            continue
+        amount, _ = _parse_candidate_amount(c)
+        if amount is not None and c.period == "N":
+            ca_amount = amount
+            break
+
+    rc_amount: Decimal | None = None
+    for c in grouped.get("RESULTAT_COURANT", []):
+        amount, _ = _parse_candidate_amount(c)
+        if amount is not None and c.period == "N":
+            rc_amount = amount
+            break
+
+    filtered: list[FinancialCandidate] = []
+    for c in candidates:
+        label = _fold(c.evidence.raw_label)
+        amount, _ = _parse_candidate_amount(c)
+        if amount is None:
+            continue
+        # Produits d'exploitation déjà exclus en eligibility
+        if "produits d exploitation" in label:
+            continue
+        # Incohérent : RE > CA (souvent lecture de TOTAL I produits)
+        if ca_amount is not None and amount > ca_amount:
+            continue
+        # Incohérent fort vs résultat courant (ex. 12 M vs RC 1,2 M)
+        if rc_amount is not None and abs(rc_amount) > 0:
+            if abs(amount - rc_amount) > abs(rc_amount) * Decimal("2.5") + Decimal(
+                "10000"
+            ):
+                continue
+        filtered.append(c)
+
+    if not filtered:
+        if ca_amount is not None or rc_amount is not None:
+            return _financial_value(
+                "RESULTAT_EXPLOITATION",
+                None,
+                "missing",
+                [],
+                warnings=[
+                    "Candidats RESULTAT_EXPLOITATION incohérents avec CA/RC — exclus."
+                ],
+            )
+        candidates = list(grouped.get("RESULTAT_EXPLOITATION", []))
+    else:
+        candidates = filtered
+
+    preferred_ii = [
+        c
+        for c in candidates
+        if "i - ii" in _fold(c.evidence.raw_label)
+        or "i-ii" in _fold(c.evidence.raw_label).replace(" ", "")
+    ]
+    named_re = [
+        c
+        for c in candidates
+        if "resultat d exploitation" in _fold(c.evidence.raw_label)
+        or "resultat dexploitation" in _fold(c.evidence.raw_label)
+    ]
+    preferred_vi = [
+        c
+        for c in candidates
+        if re.search(r"\bvi\b", _fold(c.evidence.raw_label))
+        or "+/-" in (c.evidence.raw_label or "")
+    ]
+    # CPC (I-II) > 1ʳᵉ page « Résultat d'exploitation » > ESG VI
+    if preferred_ii:
+        candidates = preferred_ii
+    elif named_re:
+        min_page = min(c.evidence.page_number for c in named_re)
+        candidates = [c for c in named_re if c.evidence.page_number == min_page]
+    elif preferred_vi:
+        candidates = preferred_vi
+    else:
+        clean = [
+            c
+            for c in candidates
+            if not re.search(r"\(\s*1\s*-\s*ii\s*\)", _fold(c.evidence.raw_label))
+        ]
+        if clean:
+            candidates = clean
+
+    if rc_amount is not None and len(candidates) > 1:
+        scored: list[tuple[Decimal, FinancialCandidate]] = []
+        for c in candidates:
+            amount, _ = _parse_candidate_amount(c)
+            if amount is None:
+                continue
+            scored.append((abs(amount - rc_amount), c))
+        scored.sort(key=lambda item: item[0])
+        if scored and scored[0][0] <= abs(rc_amount) * Decimal("1.5") + Decimal("5000"):
+            best_dist = scored[0][0]
+            near = [c for d, c in scored if d <= best_dist + Decimal("1")]
+            candidates = near or [scored[0][1]]
+
+    return _pick_best(candidates, code="RESULTAT_EXPLOITATION")
+
+
 def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) -> FinancialValue | None:
     if code == "RESULTAT_NET":
         return _resolve_resultat_net(grouped)
@@ -1070,14 +1204,20 @@ def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) ->
         filtered = [
             c
             for c in candidates
+            if _is_chiffre_affaires_label(c.evidence.raw_label)
+        ]
+        # Préférer le libellé « Chiffre(s) d'affaires » aux composantes ventes.
+        preferred_ca = [
+            c
+            for c in filtered
             if "chiffre" in _fold(c.evidence.raw_label)
             and "affaires" in _fold(c.evidence.raw_label)
-            and "achat" not in _fold(c.evidence.raw_label)
         ]
-        # Pas de fallback « tous candidats » : sinon ACHATS pollue le CA.
-        candidates = filtered
+        candidates = preferred_ca or filtered
         if not candidates:
             return _financial_value("CHIFFRE_AFFAIRES", None, "missing", [])
+    if code == "RESULTAT_EXPLOITATION":
+        return _resolve_resultat_exploitation(grouped)
     if code == "ACHATS_REVENDUS":
         preferred = [
             c
@@ -1281,6 +1421,7 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
         "STOCKS",
         "DETTES_FINANCIERES",
         "CHIFFRE_AFFAIRES",
+        "RESULTAT_EXPLOITATION",
         "ACHATS_REVENDUS",
         "CHARGES_INTERETS",
         "CHARGES_FINANCIERES",

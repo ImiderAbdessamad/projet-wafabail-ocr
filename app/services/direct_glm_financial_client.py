@@ -109,15 +109,20 @@ _SECTION_RULES: dict[str, str] = {
     "BILAN_PASSIF": (
         "OBLIGATOIRE si visible : TOTAL_PASSIF = 'TOTAL I+II+III' "
         "(nature=GRAND_TOTAL), FONDS_PROPRES = 'TOTAL DES CAPITAUX PROPRES', "
-        "DETTES_FINANCIERES = 'TOTAL DES DETTES DE FINANCEMENT', "
+        "DETTES_FINANCIERES = 'DETTES DE FINANCEMENT (C)' / "
+        "'TOTAL DES DETTES DE FINANCEMENT' "
+        "(si la section est vide → raw_value '0,00'), "
         "PASSIF_CIRCULANT, FOURNISSEURS, TRESORERIE_PASSIF, RESULTAT_NET. "
         "column_role=EXERCICE_N pour l'exercice courant."
     ),
     "CPC": (
         "Colonnes Totaux exercice = N (TOTAL_EXERCICE_N). "
-        "CHIFFRE_AFFAIRES obligatoire. "
-        "RESULTAT_EXPLOITATION = uniquement la ligne "
-        "'Résultat d'exploitation' (PAS Produits d'exploitation). "
+        "CHIFFRE_AFFAIRES obligatoire : ligne 'Chiffre(s) d'affaires' "
+        "(souvent = total ventes) OU 'Ventes de marchandises' "
+        "OU 'Ventes de biens et services produits'. "
+        "RESULTAT_EXPLOITATION = ligne "
+        "'III. RESULTAT D'EXPLOITATION (I-II)' "
+        "(PAS Produits d'exploitation / Total I, PAS un montant ≈ CA). "
         "CHARGES_FINANCIERES = TOTAL V / Charges financières. "
         "RESULTAT_NET ou RESULTAT_NET_XVI, RESULTAT_COURANT."
     ),

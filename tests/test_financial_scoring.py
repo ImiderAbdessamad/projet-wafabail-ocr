@@ -49,9 +49,49 @@ def test_final_score_83():
             calculable=True,
         ),
     ]
-    final, blocking = calculate_final_score(axes)
+    final, blocking, soft = calculate_final_score(axes)
     assert blocking == []
+    assert soft == []
     assert final == Decimal("83.00")
+
+
+def test_partial_axes_financial_only_score():
+    axes = [
+        AxisScore(
+            code="financial",
+            label="F",
+            raw_score=Decimal("82"),
+            weight=Decimal("0.75"),
+            weighted_contribution=Decimal("61.50"),
+            calculable=True,
+        ),
+        AxisScore(
+            code="behavioral",
+            label="B",
+            raw_score=Decimal("0"),
+            weight=Decimal("0.15"),
+            weighted_contribution=Decimal("0"),
+            calculable=False,
+        ),
+        AxisScore(
+            code="sector",
+            label="S",
+            raw_score=Decimal("0"),
+            weight=Decimal("0.10"),
+            weighted_contribution=Decimal("0"),
+            calculable=False,
+        ),
+    ]
+    final, hard, soft = calculate_final_score(axes, allow_partial_axes=True)
+    assert hard == []
+    assert final == Decimal("82.00")
+    assert any("behavioral" in s for s in soft)
+    decision = build_credit_decision(
+        final, blocking_reasons=[], soft_warnings=soft
+    )
+    assert decision.score == Decimal("82.00")
+    assert decision.blocking_status == "PARTIAL_DATA"
+    assert "provisoire" in decision.decision.lower()
 
 
 def test_decision_grid_a_b_plus():
