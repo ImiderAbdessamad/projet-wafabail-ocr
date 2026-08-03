@@ -512,6 +512,27 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
         if section != "CPC":
             reasons.append("CHIFFRE_AFFAIRES hors CPC.")
 
+    if field_code == "RESULTAT_EXPLOITATION":
+        if section != "CPC":
+            reasons.append("RESULTAT_EXPLOITATION hors CPC.")
+        if "resultat d exploitation" not in label and "resultat dexploitation" not in label:
+            reasons.append(
+                "RESULTAT_EXPLOITATION exige le libellé Résultat d'exploitation "
+                "(pas Produits d'exploitation)."
+            )
+
+    if field_code == "RESULTAT_FISCAL":
+        if section != "RESULTAT_FISCAL":
+            reasons.append("RESULTAT_FISCAL hors section RESULTAT_FISCAL.")
+        # Lignes CPC (XIV/XVI) souvent mal classées
+        if any(tok in label for tok in ("xiv", "xvi", "xiii", "resultat net (")):
+            reasons.append("Ligne CPC résultat net refusée comme RESULTAT_FISCAL.")
+
+    if field_code == "REPORT_DEFICITAIRE":
+        # « RESULTAT COURANT ( Report ) » ≠ report déficitaire fiscal
+        if "deficit" not in label:
+            reasons.append("REPORT_DEFICITAIRE exige un libellé de déficit.")
+
     if field_code == "ENCOURS_LEASING" and "redevance" in label:
         reasons.append("Une redevance de crédit-bail n'est pas un encours.")
 
@@ -576,6 +597,11 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
         "DETTES_FINANCIERES": ("dettes de financement", "total dettes de financement"),
         "TRESORERIE_ACTIF": ("total iii tresorerie actif", "tresorerie actif"),
         "TRESORERIE_PASSIF": ("total iii tresorerie passif", "tresorerie passif"),
+        "CHARGES_FINANCIERES": (
+            "charges financieres",
+            "total v",
+            "total des charges financieres",
+        ),
     }
     for hint in exact_hints.get(field_code, ()):
         if hint in label:
@@ -595,6 +621,16 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
 
     if field_code == "RESULTAT_NET" and section == "BILAN_PASSIF":
         score -= 20.0
+
+    if field_code == "CHARGES_FINANCIERES":
+        # Pénalise les faux 0,00 issus de pages mal classées
+        raw = _fold(candidate.raw_value)
+        if raw in {"0", "0 00", "0.00", "0,00"} and "charges" not in label:
+            score -= 120.0
+        if label.replace(" ", "").replace(",", "").replace(".", "").isdigit():
+            score -= 80.0
+        # Préférer la 1ʳᵉ page CPC (page_number plus petit souvent = CPC principal)
+        score -= min(float(candidate.evidence.page_number), 20.0) * 0.5
 
     return score
 
@@ -759,17 +795,18 @@ def _pick_best(candidates: list[FinancialCandidate], *, code: str | None = None)
             "conflicting",
             [_to_provenance(candidate) for candidate, _, _ in tied],
             warnings=[
-                "Candidats Qwen de priorité équivalente avec montants divergents."
+                "Candidats de priorité équivalente avec montants divergents."
             ],
         )
 
     warnings: list[str] = list(parse_warnings)
     if len(ranked) > 1:
         warnings.append(
-            f"{len(ranked) - 1} candidat(s) Qwen de priorité inférieure conservé(s) uniquement dans l'audit."
+            f"{len(ranked) - 1} candidat(s) de priorité inférieure conservé(s) "
+            "uniquement dans l'audit."
         )
     if _has_suspected_row_shift(best_candidate):
-        warnings.append("suspected_row_shift signalé par Qwen.")
+        warnings.append("suspected_row_shift signalé par le modèle.")
     return _financial_value(
         resolved_code,
         best_amount,
@@ -779,42 +816,98 @@ def _pick_best(candidates: list[FinancialCandidate], *, code: str | None = None)
     )
 
 
-def _resolve_total_bilan(grouped: dict[str, list[FinancialCandidate]]) -> FinancialValue:
-    total_actif = _pick_best(
+def _derive_total_actif_from_sections(
+    grouped: dict[str, list[FinancialCandidate]],
+) -> FinancialValue | None:
+    """TOTAL I + TOTAL II + TOTAL III (trésorerie) → TOTAL_ACTIF."""
+    parts: list[FinancialValue] = []
+    for code in ("ACTIFS_IMMOBILISES", "ACTIF_CIRCULANT", "TRESORERIE_ACTIF"):
+        fv = _pick_best(
+            [
+                c
+                for c in grouped.get(code, [])
+                if c.evidence.section == "BILAN_ACTIF" and c.period == "N"
+            ],
+            code=code,
+        )
+        if not _usable_fv(fv):
+            return None
+        assert fv is not None
+        parts.append(fv)
+    total = sum((p.value for p in parts if p.value is not None), Decimal("0"))
+    provenances: list[ValueProvenance] = []
+    for part in parts:
+        provenances.extend(part.provenance)
+    return _financial_value(
+        "TOTAL_ACTIF",
+        total,
+        "derived",
+        provenances,
+        warnings=["Dérivé : ACTIFS_IMMOBILISES + ACTIF_CIRCULANT + TRESORERIE_ACTIF"],
+    )
+
+
+def _resolve_total_bilan(
+    grouped: dict[str, list[FinancialCandidate]],
+    *,
+    resolved_actif: FinancialValue | None = None,
+    resolved_passif: FinancialValue | None = None,
+) -> FinancialValue:
+    total_actif = resolved_actif or _pick_best(
         [c for c in grouped.get("TOTAL_ACTIF", []) if c.evidence.section == "BILAN_ACTIF" and c.period == "N"]
     )
-    total_passif = _pick_best(
+    if not _usable_fv(total_actif):
+        total_actif = _derive_total_actif_from_sections(grouped)
+
+    total_passif = resolved_passif or _pick_best(
         [c for c in grouped.get("TOTAL_PASSIF", []) if c.evidence.section == "BILAN_PASSIF" and c.period == "N"]
     )
-    if (
-        total_actif is None
-        or total_passif is None
-        or total_actif.value is None
-        or total_passif.value is None
-        or total_actif.status not in {"confirmed", "derived"}
-        or total_passif.status not in {"confirmed", "derived"}
-    ):
-        return _financial_value("TOTAL_BILAN", None, "missing", [])
 
-    tolerance = max(Decimal("1.00"), abs(total_actif.value) * Decimal("0.0001"))
-    difference = abs(total_actif.value - total_passif.value)
-    if difference > tolerance:
-        logger.error("TOTAL_ACTIF and TOTAL_PASSIF conflict")
+    if _usable_fv(total_actif) and _usable_fv(total_passif):
+        assert total_actif is not None and total_passif is not None
+        assert total_actif.value is not None and total_passif.value is not None
+        tolerance = max(Decimal("1.00"), abs(total_actif.value) * Decimal("0.0001"))
+        difference = abs(total_actif.value - total_passif.value)
+        if difference > tolerance:
+            logger.error("TOTAL_ACTIF and TOTAL_PASSIF conflict")
+            return _financial_value(
+                "TOTAL_BILAN",
+                None,
+                "conflicting",
+                total_actif.provenance + total_passif.provenance,
+                warnings=["Total actif et total passif sont différents."],
+            )
+        logger.info(
+            "Resolved TOTAL_BILAN=%s from ACTIF/PASSIF agreement", total_actif.value
+        )
         return _financial_value(
             "TOTAL_BILAN",
-            None,
-            "conflicting",
+            total_actif.value,
+            "confirmed",
             total_actif.provenance + total_passif.provenance,
-            warnings=["Total actif et total passif sont différents."],
         )
 
-    logger.info("Resolved TOTAL_BILAN=%s from ACTIF/PASSIF agreement", total_actif.value)
-    return _financial_value(
-        "TOTAL_BILAN",
-        total_actif.value,
-        "confirmed",
-        total_actif.provenance + total_passif.provenance,
-    )
+    # Un seul côté fiable : retenable pour le scoring (bilan = total actif)
+    if _usable_fv(total_actif):
+        assert total_actif is not None and total_actif.value is not None
+        return _financial_value(
+            "TOTAL_BILAN",
+            total_actif.value,
+            "derived",
+            total_actif.provenance,
+            warnings=["TOTAL_BILAN dérivé du total actif (passif manquant)."],
+        )
+    if _usable_fv(total_passif):
+        assert total_passif is not None and total_passif.value is not None
+        return _financial_value(
+            "TOTAL_BILAN",
+            total_passif.value,
+            "derived",
+            total_passif.provenance,
+            warnings=["TOTAL_BILAN dérivé du total passif (actif manquant)."],
+        )
+
+    return _financial_value("TOTAL_BILAN", None, "missing", [])
 
 
 def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> FinancialValue | None:
@@ -878,6 +971,18 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
 def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) -> FinancialValue | None:
     if code == "RESULTAT_NET":
         return _resolve_resultat_net(grouped)
+    if code == "TOTAL_ACTIF":
+        picked = _pick_best(
+            [
+                c
+                for c in grouped.get("TOTAL_ACTIF", [])
+                if c.evidence.section == "BILAN_ACTIF"
+            ],
+            code="TOTAL_ACTIF",
+        )
+        if _usable_fv(picked):
+            return picked
+        return _derive_total_actif_from_sections(grouped)
     candidates = list(grouped.get(code, []))
     if code == "STOCKS":
         candidates = [c for c in candidates if c.nature == "SECTION_TOTAL"] or candidates
@@ -891,6 +996,18 @@ def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) ->
         ] or candidates
     if code == "CHIFFRE_AFFAIRES":
         candidates = [c for c in candidates if "chiffre d affaires" in _fold(c.evidence.raw_label)] or candidates
+    if code == "CHARGES_FINANCIERES":
+        # Écarte les 0,00 sans libellé métier (pages mal classées)
+        filtered = [
+            c
+            for c in candidates
+            if not (
+                _fold(c.raw_value) in {"0", "0 00", "0.00", "0,00"}
+                and "charges" not in _fold(c.evidence.raw_label)
+                and "total v" not in _fold(c.evidence.raw_label)
+            )
+        ]
+        candidates = filtered or candidates
     if code == "ENCOURS_LEASING" and not _eligible_sorted(candidates):
         return _financial_value("ENCOURS_LEASING", None, "missing", [])
     return _pick_best(candidates, code=code)
@@ -1047,6 +1164,22 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
     grouped = group_candidates_by_field(outputs)
     resolved: dict[str, FinancialValue] = {}
 
+    # Composantes bilan avant totaux (pour dérivation I+II+III)
+    for code in (
+        "ACTIFS_IMMOBILISES",
+        "ACTIF_CIRCULANT",
+        "TRESORERIE_ACTIF",
+        "TRESORERIE_PASSIF",
+        "FONDS_PROPRES",
+        "PASSIF_CIRCULANT",
+    ):
+        fv = _pick_best(
+            [c for c in grouped.get(code, [])],
+            code=code,
+        )
+        if fv is not None:
+            resolved[code] = fv
+
     for code in (
         "TOTAL_ACTIF",
         "TOTAL_PASSIF",
@@ -1055,10 +1188,9 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
         "FOURNISSEURS",
         "STOCKS",
         "DETTES_FINANCIERES",
-        "TRESORERIE_ACTIF",
-        "TRESORERIE_PASSIF",
         "CHIFFRE_AFFAIRES",
         "CHARGES_INTERETS",
+        "CHARGES_FINANCIERES",
         "ENCOURS_LEASING",
         "REDEVANCES_CREDIT_BAIL",
     ):
@@ -1066,7 +1198,19 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
         if fv is not None:
             resolved[code] = fv
 
-    resolved["TOTAL_BILAN"] = _resolve_total_bilan(grouped)
+    resolved["TOTAL_BILAN"] = _resolve_total_bilan(
+        grouped,
+        resolved_actif=resolved.get("TOTAL_ACTIF"),
+        resolved_passif=resolved.get("TOTAL_PASSIF"),
+    )
+    # Propager total_actif dérivé si seulement TOTAL_BILAN l'a produit via sections
+    if (
+        not _usable_fv(resolved.get("TOTAL_ACTIF"))
+        and _usable_fv(resolved.get("TOTAL_BILAN"))
+    ):
+        derived = _derive_total_actif_from_sections(grouped)
+        if derived is not None:
+            resolved["TOTAL_ACTIF"] = derived
 
     for code, candidates in grouped.items():
         if code in resolved or code in {"RESULTAT_NET_XIII", "RESULTAT_NET_XVI", "UNKNOWN"}:

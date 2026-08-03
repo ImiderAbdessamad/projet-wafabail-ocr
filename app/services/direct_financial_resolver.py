@@ -27,6 +27,41 @@ _TOTAL_GENERAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_AMOUNT_LIKE_RE = re.compile(
+    r"^[\s.\u00a0]*-?\d{1,3}(?:[.\s\u00a0]\d{3})*(?:[,.]\d{1,2})?\s*$"
+)
+
+# Libellés canoniques quand GLM met le montant dans raw_label
+_CANONICAL_LABELS: dict[str, str] = {
+    "TOTAL_ACTIF": "TOTAL GENERAL I+II+III",
+    "TOTAL_PASSIF": "TOTAL I+II+III",
+    "ACTIFS_IMMOBILISES": "TOTAL I",
+    "ACTIF_CIRCULANT": "TOTAL II",
+    "TRESORERIE_ACTIF": "TOTAL TRESORERIE-ACTIF",
+    "TRESORERIE_PASSIF": "TOTAL III TRESORERIE-PASSIF",
+    "FONDS_PROPRES": "TOTAL DES CAPITAUX PROPRES",
+    "DETTES_FINANCIERES": "TOTAL DES DETTES DE FINANCEMENT",
+    "PASSIF_CIRCULANT": "TOTAL DU PASSIF CIRCULANT",
+    "STOCKS": "TOTAL STOCKS",
+    "CLIENTS": "Clients et comptes rattachés",
+    "FOURNISSEURS": "Fournisseurs et comptes rattachés",
+    "CHIFFRE_AFFAIRES": "Chiffre d'affaires",
+    "RESULTAT_NET": "Résultat net",
+    "RESULTAT_EXPLOITATION": "Résultat d'exploitation",
+    "CHARGES_FINANCIERES": "Charges financières",
+    "RESULTAT_COURANT": "Résultat courant",
+}
+
+_DEFAULT_COLUMN_ROLE: dict[str, str] = {
+    "IDENTIFICATION": "IDENTITY_VALUE",
+    "BILAN_ACTIF": "NET_N",
+    "BILAN_PASSIF": "EXERCICE_N",
+    "CPC": "TOTAL_EXERCICE_N",
+    "DETAIL_CPC": "EXERCICE_N",
+    "RESULTAT_FISCAL": "MONTANT_N",
+    "ESG": "MONTANT_N",
+}
+
 # Mapping page_type → section financial_mapping
 _PAGE_TO_SECTION = {
     "IDENTIFICATION": "IDENTIFICATION",
@@ -56,6 +91,114 @@ def _map_column_role(role: str) -> str:
     if role == "MONTANT_N1":
         return "EXERCICE_N1"
     return "UNKNOWN"
+
+
+def _label_is_amount_like(label: str, raw_value: str) -> bool:
+    folded = normalize_label(label or "")
+    value = normalize_label(raw_value or "")
+    if not folded:
+        return True
+    if value and folded == value:
+        return True
+    return bool(_AMOUNT_LIKE_RE.match(folded))
+
+
+def repair_direct_candidate(
+    candidate: DirectFinancialCandidate,
+) -> DirectFinancialCandidate:
+    """Corrige les défauts fréquents de GLM Flash (libellé=montant, role UNKNOWN)."""
+    page_type = candidate.evidence.page_type
+    field_code = candidate.field_code
+    evidence = candidate.evidence
+    nature = candidate.nature
+    warnings = list(candidate.warnings)
+    updates: dict = {}
+
+    role = evidence.column_role
+    if role in {"UNKNOWN", "MONTANT_N", "IDENTITY_VALUE"} or not role:
+        default_role = _DEFAULT_COLUMN_ROLE.get(page_type)
+        if candidate.period == "N_MINUS_1":
+            default_role = "EXERCICE_N1"
+        if default_role and default_role != role:
+            # IDENTITY_VALUE non supporté côté mapping → EXERCICE_N
+            mapped = "EXERCICE_N" if default_role == "IDENTITY_VALUE" else default_role
+            if mapped == "MONTANT_N":
+                mapped = "EXERCICE_N"
+            role = mapped  # type: ignore[assignment]
+            warnings.append(f"column_role défaut {page_type} → {role}")
+
+    raw_label = evidence.raw_label
+    if _label_is_amount_like(raw_label, candidate.raw_value):
+        amount = parse_decimal_amount(candidate.raw_value)
+        # Ne pas inventer un libellé métier pour un 0,00 ambigu
+        # (sinon conflit artificiel avec le vrai TOTAL V).
+        if amount == Decimal("0") and field_code in {
+            "CHARGES_FINANCIERES",
+            "CHARGES_INTERETS",
+            "FRAIS_FINANCIERS",
+        }:
+            pass
+        else:
+            canon = _CANONICAL_LABELS.get(field_code)
+            if canon:
+                raw_label = canon
+                warnings.append("raw_label reconstitué (GLM avait mis le montant).")
+
+    if field_code in {"TOTAL_ACTIF", "TOTAL_PASSIF"}:
+        folded_label = normalize_label(raw_label)
+        # TOTAL I / TOTAL II seuls ne doivent PAS devenir le total général.
+        is_partial = bool(
+            re.search(r"\btotal\s+(i|ii|iii)\b", folded_label, re.I)
+            and not _TOTAL_GENERAL_RE.search(folded_label)
+        )
+        if not is_partial:
+            if nature != "GRAND_TOTAL":
+                nature = "GRAND_TOTAL"
+                warnings.append("nature forcée GRAND_TOTAL pour total général.")
+            if _label_is_amount_like(evidence.raw_label, candidate.raw_value):
+                raw_label = _CANONICAL_LABELS[field_code]
+                warnings.append("libellé total général reconstitué.")
+
+    if field_code in {
+        "ACTIFS_IMMOBILISES",
+        "ACTIF_CIRCULANT",
+        "FONDS_PROPRES",
+        "DETTES_FINANCIERES",
+        "PASSIF_CIRCULANT",
+        "TRESORERIE_ACTIF",
+        "TRESORERIE_PASSIF",
+    } and nature == "DETAIL":
+        # Totaux de section souvent renvoyés en DETAIL par GLM
+        nature = "SECTION_TOTAL"
+        warnings.append("nature DETAIL → SECTION_TOTAL (total de section).")
+
+    excerpt = evidence.source_excerpt or ""
+    if excerpt.strip() in {"", "ligne|montant", "ligne|montant"}:
+        excerpt = f"{raw_label}|{candidate.raw_value}"
+
+    if (
+        role != evidence.column_role
+        or raw_label != evidence.raw_label
+        or nature != candidate.nature
+        or excerpt != evidence.source_excerpt
+    ):
+        updates["evidence"] = evidence.model_copy(
+            update={
+                "column_role": role,
+                "raw_label": raw_label[:180],
+                "source_excerpt": excerpt[:240],
+            }
+        )
+        updates["nature"] = nature
+        updates["warnings"] = warnings
+        return candidate.model_copy(update=updates)
+    return candidate
+
+
+def repair_direct_candidates(
+    candidates: list[DirectFinancialCandidate],
+) -> list[DirectFinancialCandidate]:
+    return [repair_direct_candidate(c) for c in candidates]
 
 
 def to_mapping_candidate(candidate: DirectFinancialCandidate) -> FinancialCandidate | None:
@@ -181,7 +324,7 @@ def resolve_direct_financial_candidates(
     candidates: list[DirectFinancialCandidate],
 ) -> dict[str, FinancialValue]:
     """Sélectionne les valeurs finales à partir des candidats GLM Vision."""
-    cleaned = dedupe_direct_candidates(candidates)
+    cleaned = dedupe_direct_candidates(repair_direct_candidates(candidates))
     mapped: list[FinancialCandidate] = []
     for candidate in cleaned:
         converted = to_mapping_candidate(candidate)

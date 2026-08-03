@@ -82,14 +82,16 @@ Chaque candidat :
  "confidence":0.0-1.0,
  "evidence":{"raw_label":"...","column_name":null|"...",
  "column_role":"NET_N|EXERCICE_N|TOTAL_EXERCICE_N|EXERCICE_N1|BRUT|AMORT_PROV|UNKNOWN",
- "source_excerpt":"ligne|montant"}}
+ "source_excerpt":"libellé exact | montant"}}
 
 RÈGLES :
 1. N'invente rien. Cellule vide ≠ 0. 0 explicite = valeur.
 2. raw_value = montant tel qu'affiché (espaces/virgules OK).
-3. period N = exercice courant ; N_MINUS_1 = exercice précédent.
-4. Max 12 candidats. Priorise les champs demandés.
-5. Si tu ne vois aucun montant du schéma, retourne {"candidates":[]}.
+3. evidence.raw_label = TEXTE DE LA LIGNE (jamais le montant seul).
+4. source_excerpt = "libellé | montant" (pas "ligne|montant").
+5. period N = exercice courant ; N_MINUS_1 = exercice précédent.
+6. Max 12 candidats. Priorise les champs demandés.
+7. Si tu ne vois aucun montant du schéma, retourne {"candidates":[]}.
 """.strip()
 
 _SECTION_RULES: dict[str, str] = {
@@ -98,29 +100,33 @@ _SECTION_RULES: dict[str, str] = {
         "period=N, nature=DETAIL, column_role=IDENTITY_VALUE."
     ),
     "BILAN_ACTIF": (
-        "Colonnes : Brut / Amort / Net (N) / Exercice précédent (N-1). "
-        "Prends la colonne Net pour N (column_role=NET_N). "
-        "TOTAL_ACTIF = uniquement TOTAL GENERAL I+II+III (nature=GRAND_TOTAL). "
-        "STOCKS, CLIENTS, TRESORERIE_ACTIF, ACTIF_CIRCULANT, ACTIFS_IMMOBILISES."
+        "OBLIGATOIRE si visible : TOTAL_ACTIF = ligne "
+        "'TOTAL GENERAL I+II+III' (nature=GRAND_TOTAL, column_role=NET_N). "
+        "Puis ACTIFS_IMMOBILISES (TOTAL I), ACTIF_CIRCULANT (TOTAL II), "
+        "TRESORERIE_ACTIF (TOTAL III), STOCKS, CLIENTS. "
+        "Colonnes : Net = N (NET_N) ; Exercice précédent = N-1."
     ),
     "BILAN_PASSIF": (
-        "Colonnes Exercice (N) / Exercice précédent (N-1). "
-        "FONDS_PROPRES = total capitaux propres. "
-        "DETTES_FINANCIERES = total dettes de financement. "
-        "TOTAL_PASSIF = TOTAL I+II+III (GRAND_TOTAL). "
-        "FOURNISSEURS, PASSIF_CIRCULANT, TRESORERIE_PASSIF, RESULTAT_NET."
+        "OBLIGATOIRE si visible : TOTAL_PASSIF = 'TOTAL I+II+III' "
+        "(nature=GRAND_TOTAL), FONDS_PROPRES = 'TOTAL DES CAPITAUX PROPRES', "
+        "DETTES_FINANCIERES = 'TOTAL DES DETTES DE FINANCEMENT', "
+        "PASSIF_CIRCULANT, FOURNISSEURS, TRESORERIE_PASSIF, RESULTAT_NET. "
+        "column_role=EXERCICE_N pour l'exercice courant."
     ),
     "CPC": (
-        "Colonnes 1+2 / Totaux exercice (N, column_role=TOTAL_EXERCICE_N) / "
-        "Exercice précédent (N-1). "
-        "CHIFFRE_AFFAIRES obligatoire si visible. "
-        "RESULTAT_NET ou RESULTAT_NET_XVI pour le résultat net. "
-        "RESULTAT_EXPLOITATION, RESULTAT_COURANT, CHARGES_FINANCIERES."
+        "Colonnes Totaux exercice = N (TOTAL_EXERCICE_N). "
+        "CHIFFRE_AFFAIRES obligatoire. "
+        "RESULTAT_EXPLOITATION = uniquement la ligne "
+        "'Résultat d'exploitation' (PAS Produits d'exploitation). "
+        "CHARGES_FINANCIERES = TOTAL V / Charges financières. "
+        "RESULTAT_NET ou RESULTAT_NET_XVI, RESULTAT_COURANT."
     ),
     "DETAIL_CPC": "Priorité REDEVANCES_CREDIT_BAIL si visible.",
     "RESULTAT_FISCAL": (
+        "Uniquement le tableau de passage résultat comptable → fiscal. "
         "RESULTAT_FISCAL, REINTEGRATIONS, DEDUCTIONS, IS_DU, "
-        "COTISATION_MINIMALE, REPORT_DEFICITAIRE."
+        "COTISATION_MINIMALE, REPORT_DEFICITAIRE (libellé avec 'déficit'). "
+        "Ne prends PAS les lignes CPC XIV/XVI."
     ),
     "ESG": "CAF, EBE, VALEUR_AJOUTEE si explicitement affichés.",
 }

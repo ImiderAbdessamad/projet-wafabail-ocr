@@ -27,8 +27,8 @@ def _c(
     *,
     page_type: str,
     label: str,
-    column: str,
-    role: str,
+    column: str | None = None,
+    role: str = "UNKNOWN",
     period: str = "N",
     nature: str = "DETAIL",
     page: int = 1,
@@ -206,3 +206,83 @@ def test_actif_passif_control_and_dataset():
     assert any(status == "passed" for status in codes.values())
     assert dataset.encours_leasing.value is None
     assert dataset.tresorerie_nette.value == Decimal("201167.82")
+
+
+def test_repair_amount_as_label_and_derive_total_bilan():
+    """Cas SERDILAB réel : GLM met le montant dans raw_label, pas de TOTAL_ACTIF."""
+    cands = [
+        _c(
+            "ACTIFS_IMMOBILISES",
+            "338.562,41",
+            page_type="BILAN_ACTIF",
+            label="338.562,41",
+            column=None,
+            role="UNKNOWN",
+            nature="DETAIL",
+            page=2,
+        ),
+        _c(
+            "ACTIF_CIRCULANT",
+            "21.763.766,88",
+            page_type="BILAN_ACTIF",
+            label="21.763.766,88",
+            column=None,
+            role="UNKNOWN",
+            nature="DETAIL",
+            page=2,
+        ),
+        _c(
+            "TRESORERIE_ACTIF",
+            "201.167,82",
+            page_type="BILAN_ACTIF",
+            label="201.167,82",
+            column=None,
+            role="UNKNOWN",
+            nature="DETAIL",
+            page=2,
+        ),
+        _c(
+            "FONDS_PROPRES",
+            "9.114.715,17",
+            page_type="BILAN_PASSIF",
+            label="9.114.715,17",
+            column=None,
+            role="UNKNOWN",
+            nature="DETAIL",
+            page=3,
+        ),
+        _c(
+            "CHARGES_FINANCIERES",
+            "200.928,82",
+            page_type="CPC",
+            label="TOTAL V",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "CHARGES_FINANCIERES",
+            "0.00",
+            page_type="CPC",
+            label="0.00",
+            role="TOTAL_EXERCICE_N",
+            page=6,
+        ),
+        _c(
+            "REPORT_DEFICITAIRE",
+            "1.187.736,60",
+            page_type="RESULTAT_FISCAL",
+            label="RESULTAT COURANT ( Report )",
+            role="TOTAL_EXERCICE_N",
+            page=5,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["ACTIFS_IMMOBILISES"].value == Decimal("338562.41")
+    assert resolved["TOTAL_ACTIF"].value == Decimal("22303497.11")
+    assert resolved["TOTAL_BILAN"].value == Decimal("22303497.11")
+    assert resolved["FONDS_PROPRES"].value == Decimal("9114715.17")
+    assert resolved["CHARGES_FINANCIERES"].value == Decimal("200928.82")
+    assert (
+        "REPORT_DEFICITAIRE" not in resolved
+        or resolved["REPORT_DEFICITAIRE"].value is None
+    )

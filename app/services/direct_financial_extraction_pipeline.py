@@ -306,6 +306,83 @@ async def _extract_with_regions(
     return dedupe_direct_candidates(merged), total_latency, "regional_fallback"
 
 
+_KEY_FIELDS_BY_TYPE: dict[str, frozenset[str]] = {
+    "BILAN_ACTIF": frozenset({"TOTAL_ACTIF", "ACTIFS_IMMOBILISES", "ACTIF_CIRCULANT"}),
+    "BILAN_PASSIF": frozenset(
+        {"TOTAL_PASSIF", "FONDS_PROPRES", "DETTES_FINANCIERES", "PASSIF_CIRCULANT"}
+    ),
+    "CPC": frozenset({"CHIFFRE_AFFAIRES", "RESULTAT_NET", "RESULTAT_NET_XVI"}),
+}
+
+
+_FOCUSED_PROMPTS: dict[str, str] = {
+    "BILAN_ACTIF": (
+        "Extrais UNIQUEMENT ces lignes si visibles (colonne Net) : "
+        "TOTAL GENERAL I+II+III → TOTAL_ACTIF (GRAND_TOTAL), "
+        "TOTAL I → ACTIFS_IMMOBILISES, TOTAL II → ACTIF_CIRCULANT, "
+        "TOTAL III / Trésorerie → TRESORERIE_ACTIF, "
+        "Clients et comptes rattachés → CLIENTS, TOTAL STOCKS → STOCKS. "
+        "raw_label = texte de la ligne, pas le montant."
+    ),
+    "BILAN_PASSIF": (
+        "Extrais UNIQUEMENT ces lignes si visibles (colonne Exercice) : "
+        "TOTAL I+II+III → TOTAL_PASSIF (GRAND_TOTAL), "
+        "TOTAL DES CAPITAUX PROPRES → FONDS_PROPRES, "
+        "TOTAL DES DETTES DE FINANCEMENT → DETTES_FINANCIERES, "
+        "TOTAL DU PASSIF CIRCULANT → PASSIF_CIRCULANT, "
+        "Fournisseurs et comptes rattachés → FOURNISSEURS, "
+        "Trésorerie-Passif → TRESORERIE_PASSIF. "
+        "raw_label = texte de la ligne, pas le montant."
+    ),
+    "CPC": (
+        "Extrais UNIQUEMENT : Chiffre d'affaires → CHIFFRE_AFFAIRES, "
+        "Résultat net (XIII ou XVI) → RESULTAT_NET_XVI, "
+        "Charges financières / TOTAL V → CHARGES_FINANCIERES, "
+        "Résultat d'exploitation → RESULTAT_EXPLOITATION. "
+        "raw_label = texte de la ligne."
+    ),
+}
+
+
+async def _focused_extract(
+    image_bytes: bytes,
+    *,
+    page_number: int,
+    page_type: str,
+    orientation: int,
+) -> tuple[list[DirectFinancialCandidate], int]:
+    focus = _FOCUSED_PROMPTS.get(page_type)
+    if not focus:
+        return [], 0
+    prompt = f"{prompt_for_page_type(page_type)}\n\nPASSATION CIBLÉE :\n{focus}"
+    try:
+        mapped, latency = await extract_financial_page(
+            image_bytes,
+            page_number=page_number,
+            page_type=page_type,
+            orientation=orientation,
+            system_prompt=prompt,
+            max_attempts=1,
+        )
+        return (
+            _convert_page_output(
+                mapped,
+                page_number=page_number,
+                page_type=page_type,  # type: ignore[arg-type]
+                orientation=orientation,
+            ),
+            latency,
+        )
+    except DirectFinancialExtractionError as exc:
+        logger.warning(
+            "Extraction ciblée page=%d type=%s échouée : %s",
+            page_number,
+            page_type,
+            exc,
+        )
+        return [], 0
+
+
 async def _extract_once(
     image_bytes: bytes,
     *,
@@ -313,7 +390,7 @@ async def _extract_once(
     page_type: str,
     orientation: int,
 ) -> tuple[list[DirectFinancialCandidate], int | None, str, str | None]:
-    """Full-page puis régions si 0 candidat (tables denses / schéma trop lourd)."""
+    """Full-page puis régions / passation ciblée si champs clés absents."""
     prompt = prompt_for_page_type(page_type)
     total_latency = 0
     try:
@@ -331,10 +408,9 @@ async def _extract_once(
             page_type=page_type,  # type: ignore[arg-type]
             orientation=orientation,
         )
-        if cands:
-            return cands, total_latency, "full_page", None
-        # Succès JSON mais liste vide → forcer découpe haute/basse
-        if DIRECT_FINANCIAL_REGION_FALLBACK and page_type != "IDENTIFICATION":
+        strategy = "full_page"
+
+        if not cands and DIRECT_FINANCIAL_REGION_FALLBACK and page_type != "IDENTIFICATION":
             logger.info(
                 "Page %d type=%s : 0 candidat full-page → régions",
                 page_number,
@@ -347,9 +423,30 @@ async def _extract_once(
                 orientation=orientation,
             )
             total_latency += region_ms or 0
-            if region_cands:
-                return region_cands, total_latency, strategy, None
-        return [], total_latency, "full_page", None
+            cands = region_cands
+
+        # Passation ciblée si totaux essentiels manquent
+        key_fields = _KEY_FIELDS_BY_TYPE.get(page_type, frozenset())
+        present = {c.field_code for c in cands}
+        if key_fields and not (key_fields & present):
+            logger.info(
+                "Page %d type=%s : champs clés absents %s → passation ciblée",
+                page_number,
+                page_type,
+                sorted(key_fields),
+            )
+            focus_cands, focus_ms = await _focused_extract(
+                image_bytes,
+                page_number=page_number,
+                page_type=page_type,
+                orientation=orientation,
+            )
+            total_latency += focus_ms or 0
+            if focus_cands:
+                cands = dedupe_direct_candidates(cands + focus_cands)
+                strategy = "focused_retry"
+
+        return cands, total_latency, strategy, None
     except DirectFinancialLengthError:
         if not DIRECT_FINANCIAL_REGION_FALLBACK:
             return [], total_latency or None, "length", "done_reason=length"
