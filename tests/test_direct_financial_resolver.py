@@ -208,6 +208,48 @@ def test_actif_passif_control_and_dataset():
     assert dataset.tresorerie_nette.value == Decimal("201167.82")
 
 
+def test_achats_revendus_prefers_explicit_label():
+    """Page CPC principale gagne face à « ACHATS de marchandises » annexe."""
+    cands = [
+        _c(
+            "ACHATS_REVENDUS",
+            "9.295.560,07",
+            page_type="CPC",
+            label="Achats revendus de marchandises",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "ACHATS_REVENDUS",
+            "9 116 859,07",
+            page_type="CPC",
+            label="ACHATS de marchandises",
+            role="TOTAL_EXERCICE_N",
+            page=6,
+        ),
+        _c(
+            "ACHATS_CONSOMMES",
+            "430.367,29",
+            page_type="CPC",
+            label="Achat consommés de matières et de fourniture",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "9 116 859,07",
+            page_type="CPC",
+            label="ACHATS de marchandises",
+            role="TOTAL_EXERCICE_N",
+            page=6,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["ACHATS_REVENDUS"].value == Decimal("9295560.07")
+    assert resolved["ACHATS_REVENDUS"].status == "confirmed"
+    assert resolved["ACHATS_TOTAL"].value == Decimal("9725927.36")
+
+
 def test_ca_and_resultat_net_conflicts_resolved():
     """ACHATS / résultat courant / faux fiscal ne doivent pas bloquer le scoring."""
     cands = [

@@ -517,6 +517,15 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
         if "achat" in label:
             reasons.append("Ligne d'achats refusée comme CHIFFRE_AFFAIRES.")
 
+    if field_code == "ACHATS_REVENDUS":
+        if section not in {"CPC", "DETAIL_CPC"}:
+            reasons.append("ACHATS_REVENDUS hors CPC.")
+        if "revendu" not in label:
+            reasons.append(
+                "ACHATS_REVENDUS exige un libellé « Achats revendus » "
+                "(pas « ACHATS de marchandises » seul)."
+            )
+
     if field_code == "RESULTAT_EXPLOITATION":
         if section != "CPC":
             reasons.append("RESULTAT_EXPLOITATION hors CPC.")
@@ -619,6 +628,14 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
             "total v",
             "total des charges financieres",
         ),
+        "ACHATS_REVENDUS": (
+            "achats revendus",
+            "achats revendus de marchandises",
+        ),
+        "ACHATS_CONSOMMES": (
+            "achats consommes",
+            "achat consommes",
+        ),
     }
     for hint in exact_hints.get(field_code, ()):
         if hint in label:
@@ -647,6 +664,14 @@ def candidate_priority(candidate: FinancialCandidate) -> float:
         if label.replace(" ", "").replace(",", "").replace(".", "").isdigit():
             score -= 80.0
         # Préférer la 1ʳᵉ page CPC (page_number plus petit souvent = CPC principal)
+        score -= min(float(candidate.evidence.page_number), 20.0) * 0.5
+
+    if field_code == "ACHATS_REVENDUS":
+        if "revendu" in label:
+            score += 80.0
+        else:
+            # Achats génériques / pages annexes (souvent montant différent)
+            score -= 100.0
         score -= min(float(candidate.evidence.page_number), 20.0) * 0.5
 
     return score
@@ -1053,6 +1078,16 @@ def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) ->
         candidates = filtered
         if not candidates:
             return _financial_value("CHIFFRE_AFFAIRES", None, "missing", [])
+    if code == "ACHATS_REVENDUS":
+        preferred = [
+            c
+            for c in candidates
+            if "revendu" in _fold(c.evidence.raw_label)
+        ]
+        # Sans « revendus », les « ACHATS de marchandises » annexes divergent.
+        candidates = preferred
+        if not candidates:
+            return _financial_value("ACHATS_REVENDUS", None, "missing", [])
     if code == "CHARGES_FINANCIERES":
         # Écarte les 0,00 sans libellé métier (pages mal classées)
         filtered = [
@@ -1246,6 +1281,7 @@ def resolve_financial_candidates(outputs: list[FinancialMappingOutput]) -> dict[
         "STOCKS",
         "DETTES_FINANCIERES",
         "CHIFFRE_AFFAIRES",
+        "ACHATS_REVENDUS",
         "CHARGES_INTERETS",
         "CHARGES_FINANCIERES",
         "ENCOURS_LEASING",

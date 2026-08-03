@@ -118,10 +118,15 @@ def _remap_mislabelled_field(
                 return "ACHATS_REVENDUS"
             if "consom" in folded:
                 return "ACHATS_CONSOMMES"
-            return "ACHATS_REVENDUS"
+            # « ACHATS de marchandises » sans « revendus » : ne pas forcer
+            # ACHATS_REVENDUS (pages annexes → conflits de montants).
+            return field_code
         if folded in {"total", "totaux"} or folded.startswith("total "):
-            # « Total » générique ≠ CA
-            return field_code  # laissé pour rejet eligibility si besoin
+            return field_code
+    if field_code == "ACHATS_REVENDUS":
+        # GLM a parfois tagué un achat générique comme ACHATS_REVENDUS
+        if "achat" in folded and "revendu" not in folded and "consom" not in folded:
+            return "UNKNOWN"
     if field_code == "RESULTAT_NET" and "resultat courant" in folded:
         return "RESULTAT_COURANT"
     return field_code
