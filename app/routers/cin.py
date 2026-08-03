@@ -72,7 +72,17 @@ async def extract_cin(
         results = await asyncio.gather(*tasks)
     except GlmExtractionError as exc:
         logger.error("Extraction CIN échouée : %s", exc)
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        detail = str(exc)
+        # 503 = upstream GPU indisponible / timeout gateway (pas une erreur métier)
+        status = (
+            503
+            if any(
+                token in detail.lower()
+                for token in ("504", "502", "503", "gateway", "timeout", "contacter ollama")
+            )
+            else 502
+        )
+        raise HTTPException(status_code=status, detail=detail) from exc
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     sides_data = [side for side, _ in results]

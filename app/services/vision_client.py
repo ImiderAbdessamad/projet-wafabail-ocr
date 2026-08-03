@@ -72,6 +72,20 @@ def _clean_markdown_response(raw: str) -> str:
     return text.strip()
 
 
+def _upstream_gateway_message(status_code: int, body_excerpt: str) -> str:
+    """Message métier pour les 502/504 du reverse-proxy GPU (NiceGPU/Cloudflare)."""
+    excerpt = (body_excerpt or "").lower()
+    if status_code == 504 or "500 level error" in excerpt or "cloudflare" in excerpt:
+        return (
+            f"Le serveur GPU Ollama a répondu HTTP {status_code} (gateway timeout ~60s). "
+            "Le modèle GLM est trop long à charger/répondre derrière le proxy. "
+            "Actions : redémarrer l'instance NiceGPU, garder le modèle chaud "
+            "(keep_alive), ou augmenter le timeout gateway. "
+            f"URL={OLLAMA_URL}"
+        )
+    return f"Ollama HTTP {status_code} : {(body_excerpt or '')[:180]}"
+
+
 async def vision_chat_json(
     image_bytes: bytes,
     system_prompt: str,
@@ -80,6 +94,7 @@ async def vision_chat_json(
     *,
     timeout_seconds: float | None = None,
     num_predict: int | None = None,
+    max_attempts: int = 3,
 ) -> tuple[dict[str, Any], float]:
     """Envoie une image à Ollama (modèle GLM vision) et retourne le JSON structuré.
 
@@ -87,9 +102,10 @@ async def vision_chat_json(
         (dict_parsé, temps_écoulé_en_ms)
     """
     b64_image = base64.b64encode(image_bytes).decode("ascii")
+    used_model = model or OLLAMA_MODEL
 
     payload = {
-        "model": model or OLLAMA_MODEL,
+        "model": used_model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message, "images": [b64_image]},
@@ -104,44 +120,69 @@ async def vision_chat_json(
 
     timeout = timeout_seconds or OLLAMA_TIMEOUT_SECONDS or REQUEST_TIMEOUT_SECONDS
     started = time.perf_counter()
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-            if response.status_code in {500, 502, 503, 504}:
-                raise VisionExtractionError(
-                    f"Ollama HTTP {response.status_code} : {response.text[:180]}"
+    last_error: Exception | None = None
+
+    for attempt in range(1, max(1, max_attempts) + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                response = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
+                if response.status_code in {500, 502, 503, 504}:
+                    raise VisionExtractionError(
+                        _upstream_gateway_message(
+                            response.status_code, response.text[:300]
+                        )
+                    )
+                response.raise_for_status()
+
+            body = response.json()
+            raw_content = body.get("message", {}).get("content", "")
+            if not raw_content:
+                raise VisionExtractionError("Réponse vide du modèle.")
+
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            return extract_json_block(raw_content), elapsed_ms
+
+        except httpx.ConnectError as exc:
+            last_error = VisionExtractionError(
+                f"Impossible de contacter Ollama sur {OLLAMA_URL}. "
+                "Vérifiez qu'Ollama est démarré (`ollama serve`)."
+            )
+            last_error.__cause__ = exc
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:300]
+            if exc.response.status_code == 404:
+                last_error = VisionExtractionError(
+                    f"Modèle '{used_model}' introuvable sur Ollama. "
+                    f"Lancez `ollama pull {used_model}` puis réessayez."
                 )
-            response.raise_for_status()
-    except httpx.ConnectError as exc:
-        raise VisionExtractionError(
-            f"Impossible de contacter Ollama sur {OLLAMA_URL}. "
-            "Vérifiez qu'Ollama est démarré (`ollama serve`)."
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        detail = exc.response.text[:300]
-        used_model = model or OLLAMA_MODEL
-        if exc.response.status_code == 404:
-            raise VisionExtractionError(
-                f"Modèle '{used_model}' introuvable sur Ollama. "
-                f"Lancez `ollama pull {used_model}` puis réessayez."
-            ) from exc
-        raise VisionExtractionError(
-            f"Ollama a répondu avec une erreur ({exc.response.status_code}) : {detail}"
-        ) from exc
-    except httpx.TimeoutException as exc:
-        raise VisionExtractionError(
-            "Le modèle n'a pas répondu à temps (timeout). Le modèle est peut-être "
-            "encore en cours de chargement — réessayez dans quelques secondes."
-        ) from exc
+            elif exc.response.status_code in {500, 502, 503, 504}:
+                last_error = VisionExtractionError(
+                    _upstream_gateway_message(exc.response.status_code, detail)
+                )
+            else:
+                last_error = VisionExtractionError(
+                    f"Ollama a répondu avec une erreur ({exc.response.status_code}) : {detail}"
+                )
+            last_error.__cause__ = exc
+        except httpx.TimeoutException as exc:
+            last_error = VisionExtractionError(
+                "Le modèle n'a pas répondu à temps (timeout). Le modèle est peut-être "
+                "encore en cours de chargement — réessayez dans quelques secondes."
+            )
+            last_error.__cause__ = exc
+        except VisionExtractionError as exc:
+            last_error = exc
 
-    elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.warning(
+            "Vision JSON tentative %d/%d échouée : %s",
+            attempt,
+            max_attempts,
+            last_error,
+        )
+        if attempt < max_attempts:
+            await asyncio.sleep(min(2**attempt, 8))
 
-    body = response.json()
-    raw_content = body.get("message", {}).get("content", "")
-    if not raw_content:
-        raise VisionExtractionError("Réponse vide du modèle.")
-
-    return extract_json_block(raw_content), elapsed_ms
+    raise VisionExtractionError(str(last_error) if last_error else "Extraction vision échouée.")
 
 
 async def vision_chat_text(

@@ -58,6 +58,7 @@ from app.services.financial_page_classifier import (
 )
 from app.services.financial_ratios import calculate_financial_ratios
 from app.services.financial_scoring import calculate_financial_score
+from app.services.native_financial_recovery import recover_candidates_from_native_text
 from app.services.page_preprocessor import crop_content_regions
 from app.services.behavioral_scoring import calculate_behavioral_score
 from app.services.sector_scoring import calculate_sector_score
@@ -796,6 +797,25 @@ async def analyze_financial_document(
 
         if DIRECT_FINANCIAL_PAGE_DELAY_SECONDS > 0:
             await asyncio.sleep(DIRECT_FINANCIAL_PAGE_DELAY_SECONDS)
+
+    # Filet de sécurité : CA / dettes vides / RE CPC depuis texte natif
+    native_by_page = {
+        p.page_number: p.native_text for p in rendered if (p.native_text or "").strip()
+    }
+    page_types_map = {
+        a.page_number: a.detected_type for a in page_audit if a.detected_type
+    }
+    before = len(all_candidates)
+    all_candidates = recover_candidates_from_native_text(
+        all_candidates,
+        native_by_page,
+        page_types=page_types_map,
+    )
+    all_candidates = dedupe_direct_candidates(all_candidates)
+    if len(all_candidates) > before:
+        warnings.append(
+            f"Récupération native : +{len(all_candidates) - before} candidat(s)."
+        )
 
     _emit("resolving_fields", {"candidates": len(all_candidates)})
     dataset = build_dataset_from_direct_candidates(all_candidates)
