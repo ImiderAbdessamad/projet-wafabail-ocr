@@ -511,6 +511,11 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
     if field_code == "CHIFFRE_AFFAIRES":
         if section != "CPC":
             reasons.append("CHIFFRE_AFFAIRES hors CPC.")
+        # « Chiffre(s) d'affaires » ; pas Achats / Total générique
+        if not ("chiffre" in label and "affaires" in label):
+            reasons.append("CHIFFRE_AFFAIRES exige un libellé Chiffre d'affaires.")
+        if "achat" in label:
+            reasons.append("Ligne d'achats refusée comme CHIFFRE_AFFAIRES.")
 
     if field_code == "RESULTAT_EXPLOITATION":
         if section != "CPC":
@@ -524,9 +529,21 @@ def candidate_is_eligible(candidate: FinancialCandidate) -> tuple[bool, list[str
     if field_code == "RESULTAT_FISCAL":
         if section != "RESULTAT_FISCAL":
             reasons.append("RESULTAT_FISCAL hors section RESULTAT_FISCAL.")
-        # Lignes CPC (XIV/XVI) souvent mal classées
-        if any(tok in label for tok in ("xiv", "xvi", "xiii", "resultat net (")):
+        # Lignes CPC / résultat net (XI–XVI) — fold retire les parenthèses
+        if "resultat net" in label and any(
+            tok in label for tok in ("xi", "xii", "xiii", "xiv", "xv", "xvi")
+        ):
             reasons.append("Ligne CPC résultat net refusée comme RESULTAT_FISCAL.")
+        if "resultat fiscal" not in label and "resultat net fiscal" not in label:
+            if "resultat net" in label:
+                reasons.append(
+                    "RESULTAT_FISCAL exige un libellé de résultat fiscal "
+                    "(pas résultat net CPC)."
+                )
+
+    if field_code in {"RESULTAT_NET", "RESULTAT_NET_XIII", "RESULTAT_NET_XVI"}:
+        if "resultat courant" in label and "resultat net" not in label:
+            reasons.append("Résultat courant n'est pas le résultat net.")
 
     if field_code == "REPORT_DEFICITAIRE":
         # « RESULTAT COURANT ( Report ) » ≠ report déficitaire fiscal
@@ -920,12 +937,15 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
         if c.evidence.section == "CPC"
         and c.period == "N"
         and c.evidence.column_role == "TOTAL_EXERCICE_N"
+        and "resultat net" in _fold(c.evidence.raw_label)
     ]
     bilan = _eligible_sorted(grouped.get("RESULTAT_NET", []))
     bilan = [
         (c, a, w)
         for c, a, w in bilan
-        if c.evidence.section == "BILAN_PASSIF" and c.period == "N"
+        if c.evidence.section == "BILAN_PASSIF"
+        and c.period == "N"
+        and "resultat net" in _fold(c.evidence.raw_label)
     ]
 
     if xiii and xvi:
@@ -934,14 +954,28 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
         provenances = [_to_provenance(c13), _to_provenance(c16)]
         if _amounts_agree(v13, v16):
             if bilan and not _amounts_agree(v13, bilan[0][1]):
+                # Concordance XIII/XVI prioritaire ; bilan divergent en warning
                 return _financial_value(
                     "RESULTAT_NET",
-                    None,
-                    "conflicting",
-                    provenances + [_to_provenance(bilan[0][0])],
-                    warnings=["Résultat net CPC ≠ bilan passif."],
+                    v13,
+                    "confirmed",
+                    provenances,
+                    warnings=[
+                        "Résultat net CPC retenu (XIII=XVI) ; "
+                        "bilan passif divergent ignoré."
+                    ],
                 )
             return _financial_value("RESULTAT_NET", v13, "confirmed", provenances)
+        # XIII ≠ XVI : préférer le bilan si dispo
+        if bilan:
+            c, a, w = bilan[0]
+            return _financial_value(
+                "RESULTAT_NET",
+                a,
+                "confirmed",
+                [_to_provenance(c)],
+                warnings=[f"XIII {v13} ≠ XVI {v16} ; bilan passif retenu."],
+            )
         return _financial_value(
             "RESULTAT_NET",
             None,
@@ -950,20 +984,33 @@ def _resolve_resultat_net(grouped: dict[str, list[FinancialCandidate]]) -> Finan
             warnings=[f"XIII {v13} ≠ XVI {v16}"],
         )
 
-    if cpc:
-        best_c, best_a, best_w = cpc[0]
-        if bilan and not _amounts_agree(best_a, bilan[0][1]):
+    if cpc and bilan:
+        best_c, best_a, _best_w = cpc[0]
+        if _amounts_agree(best_a, bilan[0][1]):
             return _financial_value(
                 "RESULTAT_NET",
-                None,
-                "conflicting",
+                best_a,
+                "confirmed",
                 [_to_provenance(best_c), _to_provenance(bilan[0][0])],
-                warnings=["Résultat net CPC ≠ bilan passif."],
             )
-        return _financial_value("RESULTAT_NET", best_a, "confirmed", [_to_provenance(best_c)])
+        # Divergence : privilégier le bilan (libellé explicite « résultat net »)
+        c, a, _w = bilan[0]
+        return _financial_value(
+            "RESULTAT_NET",
+            a,
+            "confirmed",
+            [_to_provenance(c)],
+            warnings=["CPC divergent ; résultat net bilan passif retenu."],
+        )
+
+    if cpc:
+        best_c, best_a, _best_w = cpc[0]
+        return _financial_value(
+            "RESULTAT_NET", best_a, "confirmed", [_to_provenance(best_c)]
+        )
 
     if bilan:
-        c, a, w = bilan[0]
+        c, a, _w = bilan[0]
         return _financial_value("RESULTAT_NET", a, "confirmed", [_to_provenance(c)])
     return None
 
@@ -995,7 +1042,17 @@ def _resolve_special(code: str, grouped: dict[str, list[FinancialCandidate]]) ->
             or _fold(c.evidence.raw_label).startswith("dettes de financement")
         ] or candidates
     if code == "CHIFFRE_AFFAIRES":
-        candidates = [c for c in candidates if "chiffre d affaires" in _fold(c.evidence.raw_label)] or candidates
+        filtered = [
+            c
+            for c in candidates
+            if "chiffre" in _fold(c.evidence.raw_label)
+            and "affaires" in _fold(c.evidence.raw_label)
+            and "achat" not in _fold(c.evidence.raw_label)
+        ]
+        # Pas de fallback « tous candidats » : sinon ACHATS pollue le CA.
+        candidates = filtered
+        if not candidates:
+            return _financial_value("CHIFFRE_AFFAIRES", None, "missing", [])
     if code == "CHARGES_FINANCIERES":
         # Écarte les 0,00 sans libellé métier (pages mal classées)
         filtered = [

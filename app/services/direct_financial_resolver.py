@@ -103,6 +103,30 @@ def _label_is_amount_like(label: str, raw_value: str) -> bool:
     return bool(_AMOUNT_LIKE_RE.match(folded))
 
 
+def _remap_mislabelled_field(
+    field_code: str,
+    raw_label: str,
+) -> str:
+    """Corrige les field_code GLM manifestement faux d'après le libellé."""
+    label = normalize_label(raw_label)
+    folded = re.sub(r"[^a-z0-9\s]+", " ", label.lower())
+    folded = re.sub(r"\s+", " ", folded).strip()
+
+    if field_code == "CHIFFRE_AFFAIRES":
+        if "achat" in folded and "affaires" not in folded:
+            if "revendu" in folded:
+                return "ACHATS_REVENDUS"
+            if "consom" in folded:
+                return "ACHATS_CONSOMMES"
+            return "ACHATS_REVENDUS"
+        if folded in {"total", "totaux"} or folded.startswith("total "):
+            # « Total » générique ≠ CA
+            return field_code  # laissé pour rejet eligibility si besoin
+    if field_code == "RESULTAT_NET" and "resultat courant" in folded:
+        return "RESULTAT_COURANT"
+    return field_code
+
+
 def repair_direct_candidate(
     candidate: DirectFinancialCandidate,
 ) -> DirectFinancialCandidate:
@@ -113,6 +137,12 @@ def repair_direct_candidate(
     nature = candidate.nature
     warnings = list(candidate.warnings)
     updates: dict = {}
+
+    remapped = _remap_mislabelled_field(field_code, evidence.raw_label)
+    if remapped != field_code:
+        warnings.append(f"field_code {field_code} → {remapped} (libellé).")
+        field_code = remapped
+        updates["field_code"] = field_code
 
     role = evidence.column_role
     if role in {"UNKNOWN", "MONTANT_N", "IDENTITY_VALUE"} or not role:
@@ -173,15 +203,15 @@ def repair_direct_candidate(
         warnings.append("nature DETAIL → SECTION_TOTAL (total de section).")
 
     excerpt = evidence.source_excerpt or ""
-    if excerpt.strip() in {"", "ligne|montant", "ligne|montant"}:
+    if excerpt.strip() in {"", "ligne|montant"}:
         excerpt = f"{raw_label}|{candidate.raw_value}"
 
-    if (
+    evidence_changed = (
         role != evidence.column_role
         or raw_label != evidence.raw_label
-        or nature != candidate.nature
-        or excerpt != evidence.source_excerpt
-    ):
+        or excerpt != (evidence.source_excerpt or "")
+    )
+    if evidence_changed:
         updates["evidence"] = evidence.model_copy(
             update={
                 "column_role": role,
@@ -189,8 +219,11 @@ def repair_direct_candidate(
                 "source_excerpt": excerpt[:240],
             }
         )
+    if nature != candidate.nature:
         updates["nature"] = nature
+    if warnings != list(candidate.warnings) or updates:
         updates["warnings"] = warnings
+    if updates:
         return candidate.model_copy(update=updates)
     return candidate
 

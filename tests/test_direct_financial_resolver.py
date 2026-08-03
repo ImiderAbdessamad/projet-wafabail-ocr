@@ -208,6 +208,78 @@ def test_actif_passif_control_and_dataset():
     assert dataset.tresorerie_nette.value == Decimal("201167.82")
 
 
+def test_ca_and_resultat_net_conflicts_resolved():
+    """ACHATS / résultat courant / faux fiscal ne doivent pas bloquer le scoring."""
+    cands = [
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "13.404.177,00",
+            page_type="CPC",
+            label="Chiffres d'affaires",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "9 116 859,07",
+            page_type="CPC",
+            label="ACHATS de marchandises",
+            role="TOTAL_EXERCICE_N",
+            page=6,
+        ),
+        _c(
+            "CHIFFRE_AFFAIRES",
+            "13.404.177,00",
+            page_type="CPC",
+            label="Total",
+            role="TOTAL_EXERCICE_N",
+            page=7,
+        ),
+        _c(
+            "RESULTAT_NET",
+            "1.187.736,60",
+            page_type="CPC",
+            label="RESULTAT COURANT (III - VI)",
+            role="TOTAL_EXERCICE_N",
+            page=4,
+        ),
+        _c(
+            "RESULTAT_NET",
+            "1.179.809,16",
+            page_type="BILAN_PASSIF",
+            label="Résultat net de l'exercice (2)",
+            role="EXERCICE_N",
+            page=3,
+        ),
+        _c(
+            "RESULTAT_FISCAL",
+            "1.179.809,16",
+            page_type="RESULTAT_FISCAL",
+            label="RESULTAT NET ( XI - XII )",
+            role="NET_N",
+            page=5,
+        ),
+        _c(
+            "RESULTAT_FISCAL",
+            "670.378,06",
+            page_type="RESULTAT_FISCAL",
+            label="RESULTAT NET ( XI - XII )",
+            role="NET_N",
+            page=5,
+        ),
+    ]
+    resolved = resolve_direct_financial_candidates(cands)
+    assert resolved["CHIFFRE_AFFAIRES"].value == Decimal("13404177.00")
+    assert resolved["CHIFFRE_AFFAIRES"].status == "confirmed"
+    assert resolved["RESULTAT_NET"].value == Decimal("1179809.16")
+    assert resolved["RESULTAT_NET"].status == "confirmed"
+    assert (
+        "RESULTAT_FISCAL" not in resolved
+        or resolved["RESULTAT_FISCAL"].value is None
+        or resolved["RESULTAT_FISCAL"].status == "missing"
+    )
+
+
 def test_repair_amount_as_label_and_derive_total_bilan():
     """Cas SERDILAB réel : GLM met le montant dans raw_label, pas de TOTAL_ACTIF."""
     cands = [

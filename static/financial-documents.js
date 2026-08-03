@@ -305,6 +305,7 @@
       renderFinancialFields(state.result);
       renderAccountingChecks(state.result);
       renderRatios(state.result);
+      renderScoring(state.result);
       renderPageAudit(state.result);
       renderJson(state.result);
       $("summaryCard").hidden = false;
@@ -480,6 +481,156 @@
       item.appendChild(p1);
       item.appendChild(p2);
       root.appendChild(item);
+    });
+  }
+
+  function statusClass(status) {
+    const raw = String(status || "non_calculable").toLowerCase().replace(/\s+/g, "_");
+    if (raw.includes("non_conforme") || raw.includes("non-conforme")) return "non_conforme";
+    if (raw.includes("surveiller")) return "a_surveiller";
+    if (raw.includes("conforme")) return "conforme";
+    if (raw.includes("non_calculable") || raw.includes("non-calculable")) return "non_calculable";
+    return raw;
+  }
+
+  function formatRatioDisplay(value, unit) {
+    if (value == null || value === "") return "N/C";
+    const num = Number(value);
+    if (Number.isNaN(num)) return String(value);
+    const formatted = num.toLocaleString("fr-FR", {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    return unit ? `${formatted} ${unit}` : formatted;
+  }
+
+  function renderScoring(result) {
+    const decisionEl = $("scoringDecision");
+    const axesEl = $("scoringAxes");
+    const ratiosEl = $("scoringRatios");
+    if (!decisionEl || !axesEl || !ratiosEl) return;
+
+    const decision = result.decision || {};
+    const score =
+      decision.score != null && decision.score !== ""
+        ? Number(decision.score).toFixed(1)
+        : "—";
+    decisionEl.innerHTML = "";
+    const scoreBox = document.createElement("div");
+    scoreBox.className = "fd-decision-score";
+    scoreBox.innerHTML = `${score}<small>Score</small>`;
+    const meta = document.createElement("div");
+    meta.className = "fd-decision-meta";
+    const cls = document.createElement("div");
+    cls.className = "fd-decision-class";
+    text(cls, decision.risk_class || decision.profile || "NON_EVALUABLE");
+    const profile = document.createElement("div");
+    profile.className = "fd-decision-profile";
+    text(profile, decision.profile || "—");
+    const action = document.createElement("div");
+    action.className = "fd-decision-action";
+    text(action, decision.decision || "—");
+    const reco = document.createElement("div");
+    reco.className = "fd-decision-reco";
+    text(reco, decision.recommendation || decision.blocking_status || "");
+    meta.appendChild(cls);
+    meta.appendChild(profile);
+    meta.appendChild(action);
+    if (decision.recommendation || decision.blocking_status) meta.appendChild(reco);
+    decisionEl.appendChild(scoreBox);
+    decisionEl.appendChild(meta);
+
+    axesEl.innerHTML = "";
+    (result.axes || []).forEach((axe) => {
+      const card = document.createElement("div");
+      card.className = "fd-axe-card" + (axe.calculable === false ? " is-blocked" : "");
+      const label = document.createElement("div");
+      label.className = "fd-axe-label";
+      text(label, axe.label || axe.code || "—");
+      const scoreAxe = document.createElement("div");
+      scoreAxe.className = "fd-axe-score";
+      text(
+        scoreAxe,
+        axe.raw_score != null && axe.raw_score !== ""
+          ? Number(axe.raw_score).toFixed(1)
+          : "—"
+      );
+      const weight = document.createElement("div");
+      weight.className = "fd-axe-weight";
+      const w = axe.weight != null ? Number(axe.weight) : null;
+      const contrib =
+        axe.weighted_contribution != null && axe.weighted_contribution !== ""
+          ? Number(axe.weighted_contribution).toFixed(2)
+          : "—";
+      text(
+        weight,
+        w != null
+          ? `Poids ${(w * 100).toFixed(0)}% · Contrib. ${contrib}`
+          : `Contrib. ${contrib}`
+      );
+      card.appendChild(label);
+      card.appendChild(scoreAxe);
+      card.appendChild(weight);
+      const blockers = axe.blocking_reasons || [];
+      if (blockers.length) {
+        const block = document.createElement("div");
+        block.className = "fd-axe-block";
+        text(block, blockers.slice(0, 2).join(" · "));
+        card.appendChild(block);
+      }
+      axesEl.appendChild(card);
+    });
+
+    ratiosEl.innerHTML = "";
+    (result.ratios || []).forEach((ratio) => {
+      const card = document.createElement("div");
+      card.className = "fd-ratio-card";
+      const head = document.createElement("div");
+      head.className = "fd-ratio-card-head";
+      const label = document.createElement("div");
+      label.className = "fd-ratio-label";
+      text(label, ratio.label || ratio.code || "—");
+      const badge = document.createElement("span");
+      badge.className = `fd-ratio-status ${statusClass(ratio.status)}`;
+      text(badge, ratio.status || "—");
+      head.appendChild(label);
+      head.appendChild(badge);
+      const value = document.createElement("div");
+      value.className = "fd-ratio-value";
+      if (ratio.value == null || ratio.value === "") {
+        text(value, "N/C");
+      } else {
+        value.innerHTML = "";
+        const num = document.createElement("span");
+        text(num, formatRatioDisplay(ratio.value, null));
+        value.appendChild(num);
+        if (ratio.unit) {
+          const unit = document.createElement("span");
+          unit.className = "unit";
+          text(unit, ` ${ratio.unit}`);
+          value.appendChild(unit);
+        }
+      }
+      const metaLine = document.createElement("div");
+      metaLine.className = "fd-ratio-meta";
+      const points =
+        ratio.points != null || ratio.max_points != null
+          ? ` · ${ratio.points ?? 0}/${ratio.max_points ?? 0} pts`
+          : "";
+      text(
+        metaLine,
+        `${ratio.threshold ? `Seuil ${ratio.threshold}` : ratio.formula || ""}${points}`
+      );
+      card.appendChild(head);
+      card.appendChild(value);
+      card.appendChild(metaLine);
+      if (ratio.formula) {
+        const formula = document.createElement("div");
+        formula.className = "fd-ratio-meta";
+        text(formula, ratio.formula);
+        card.appendChild(formula);
+      }
+      ratiosEl.appendChild(card);
     });
   }
 
